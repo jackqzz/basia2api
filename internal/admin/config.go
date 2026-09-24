@@ -100,33 +100,43 @@ func Default(baseURL, websiteURL, apiKeyAuth, listenAddr string, mock bool) *Run
 		ResinPlatform:         "Default",
 	}
 	applyPromptDefaultsFromEnv(c)
+	if c.SystemPromptMode == "" {
+		// bps 上游自带 Excel agent 提示词，默认不叠加客户端注入；需要时在管理端开启。
+		c.SystemPromptMode = "off"
+	}
 	applyAllowRemoteFromEnv(c)
 	return c
 }
 
 // applyPromptDefaultsFromEnv 用进程环境给注入文案播种（只给空字段填值，
-// 已持久化的文案优先；PRISM_SYSTEM_PROMPT=off/none/- 表示关掉注入）。
+// 已持久化的文案优先；BPS_SYSTEM_PROMPT=off/none/- 表示关掉注入）。
 func applyPromptDefaultsFromEnv(c *RuntimeConfig) {
 	if c == nil {
 		return
 	}
 	if c.SystemPrompt == "" {
-		if f := strings.TrimSpace(os.Getenv("PRISM_SYSTEM_PROMPT_FILE")); f != "" {
+		if f := strings.TrimSpace(os.Getenv("BPS_SYSTEM_PROMPT_FILE")); f != "" {
 			if b, err := os.ReadFile(f); err == nil {
 				if text := strings.TrimSpace(string(b)); text != "" {
 					c.SystemPrompt = text
+					if c.SystemPromptMode == "" {
+						c.SystemPromptMode = "inject"
+					}
 				}
 			}
 		}
 	}
 	if c.SystemPrompt == "" {
-		if v, ok := os.LookupEnv("PRISM_SYSTEM_PROMPT"); ok {
+		if v, ok := os.LookupEnv("BPS_SYSTEM_PROMPT"); ok {
 			switch strings.ToLower(strings.TrimSpace(v)) {
 			case "off", "none", "-":
 				c.SystemPromptMode = "off"
 			default:
 				if strings.TrimSpace(v) != "" {
 					c.SystemPrompt = strings.ReplaceAll(v, `\n`, "\n")
+					if c.SystemPromptMode == "" {
+						c.SystemPromptMode = "inject"
+					}
 				}
 			}
 		}

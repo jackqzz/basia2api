@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""prism-2api 冒烟测试（对应 docs/TESTPLAN.md）。
+"""bps-2api 冒烟测试（对应 docs/TESTPLAN.md）。
 
 零依赖，只用标准库。默认打本地网关，用环境变量切到生产：
 
@@ -12,7 +12,7 @@
 注意：L2 的档位夹取、L3 的触发率结论必须配合容器日志才成立——
 脚本只能证明"没 400"，证明"参数真到了上游"请看：
 
-    docker logs prism-2api | grep 'prism: start\\|prism: turn'
+    docker logs bps-2api | grep 'prism: start\\|prism: turn'
 """
 
 from __future__ import annotations
@@ -526,7 +526,7 @@ def layer_l4(n):
 # ---------------------------------------------------------------- main
 
 def main():
-    ap = argparse.ArgumentParser(description="prism-2api 冒烟测试（见 docs/TESTPLAN.md）")
+    ap = argparse.ArgumentParser(description="bps-2api 冒烟测试（见 docs/TESTPLAN.md）")
     ap.add_argument("--only", default="L0,L1,L2,L3,LM,L4", help="要跑的层，逗号分隔（默认全部）")
     ap.add_argument("--models", default=",".join(DEFAULT_MODELS), help="工具触发率要覆盖的模型")
     ap.add_argument("--repeat", type=int, default=5, help="L3 每个模型的重复次数（默认 5）")

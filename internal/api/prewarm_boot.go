@@ -124,7 +124,7 @@ func (s *Server) startPrewarm() {
 					return
 				}
 				if cc.prewarmOne(s, a, time.Now()) {
-					log.Printf("prism: prewarm hook warmed account=%s", name)
+					log.Printf("bps: prewarm hook warmed account=%s", name)
 				}
 				return
 			}
@@ -163,7 +163,7 @@ func (c *prewarmController) loop(s *Server) {
 		// 风暴开闸时跳过本轮巡检：全池 sweep 是 ~2 账号/s 的固定上游压力
 		// （122 号×60s 间隔），上游挂死期间只会火上浇油；风暴闭闸后自然恢复。
 		if adapter.StormOpen() {
-			log.Printf("prism: prewarm sweep skipped (upstream storm open)")
+			log.Printf("bps: prewarm sweep skipped (upstream storm open)")
 		} else {
 			c.sweep(s, false, start)
 		}
@@ -259,7 +259,7 @@ func (c *prewarmController) sweep(s *Server, boot bool, now time.Time) {
 		}()
 	}
 	wg.Wait()
-	log.Printf("prism: prewarm sweep accounts=%d warmed=%d skipped=%d workers=%d took_ms=%d",
+	log.Printf("bps: prewarm sweep accounts=%d warmed=%d skipped=%d workers=%d took_ms=%d",
 		len(candidates), warmed.Load(), skipped.Load(), workers, time.Since(t0).Milliseconds())
 }
 
@@ -303,7 +303,7 @@ func (c *prewarmController) prewarmOne(s *Server, a *pool.Account, now time.Time
 		n := c.failures[a.Name]
 		c.nextAllowed[a.Name] = now.Add(prewarmBackoff(n))
 		c.mu.Unlock()
-		log.Printf("prism: prewarm fail account=%s fails=%d backoff=%s err=%v", a.Name, n, prewarmBackoff(n), err)
+		log.Printf("bps: prewarm fail account=%s fails=%d backoff=%s err=%v", a.Name, n, prewarmBackoff(n), err)
 		return false
 	}
 	c.mu.Lock()
@@ -311,7 +311,7 @@ func (c *prewarmController) prewarmOne(s *Server, a *pool.Account, now time.Time
 	delete(c.nextAllowed, a.Name)
 	c.lastOK[a.Name] = now
 	c.mu.Unlock()
-	log.Printf("prism: prewarm ok account=%s ms=%d", a.Name, time.Since(t0).Milliseconds())
+	log.Printf("bps: prewarm ok account=%s ms=%d", a.Name, time.Since(t0).Milliseconds())
 	return true
 }
 

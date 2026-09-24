@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"testing"
 
-	"bps-2api/internal/adapter/prism"
 	"bps-2api/internal/admin"
 )
 
@@ -25,14 +24,15 @@ func TestToAdapterRequestCarriesSystemPrompt(t *testing.T) {
 // promptText 的解析顺序：off 关、管理端文案优先、空回内置默认、无 runtime 回内置默认。
 func TestPromptTextResolution(t *testing.T) {
 	var nilServer *Server
-	if got := nilServer.promptText(); got != prism.DefaultSystemPrompt {
+	if got := nilServer.promptText(); got != defaultInjectedPrompt {
 		t.Fatalf("nil server 应回内置默认，got %q", got[:20])
 	}
 	s := &Server{runtime: admin.Default("https://x", "https://y", "", "127.0.0.1:0", true)}
-	if got := s.promptText(); got != prism.DefaultSystemPrompt {
-		t.Fatalf("默认应回内置默认，got %q", got[:20])
+	// bps 默认 off：上游自带 agent 提示词，不叠加注入。
+	if got := s.promptText(); got != "" {
+		t.Fatalf("默认应不注入（off），got %q", got[:20])
 	}
-	if _, _, err := s.runtime.Update(map[string]any{"system_prompt": "自定义"}); err != nil {
+	if _, _, err := s.runtime.Update(map[string]any{"system_prompt_mode": "inject", "system_prompt": "自定义"}); err != nil {
 		t.Fatal(err)
 	}
 	if got := s.promptText(); got != "自定义" {
@@ -43,12 +43,5 @@ func TestPromptTextResolution(t *testing.T) {
 	}
 	if got := s.promptText(); got != "" {
 		t.Fatalf("off 应不注入，got %q", got)
-	}
-}
-
-// api 侧默认文案必须与 adapter 侧保持一致，否则线上默认注入的和单测断言的不是同一份。
-func TestDefaultPromptMatchesAdapter(t *testing.T) {
-	if defaultInjectedPrompt != prism.DefaultSystemPrompt {
-		t.Fatal("defaultInjectedPrompt 与 prism.DefaultSystemPrompt 不一致：改 adapter 文案时同步改 api/prompt.go")
 	}
 }

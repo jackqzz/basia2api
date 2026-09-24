@@ -213,7 +213,7 @@ func jsonNumber(f float64) string {
 }
 
 // isDegradedMessage 识别适配器的「上游 backend 劣化」文案：预热预算耗尽时适配器报
-// "prism: upstream sandbox degraded"（实测劣化期 /api/backend/1/new 24~210s 甚至挂死）。
+// "bps: upstream sandbox degraded"（实测劣化期 /api/backend/1/new 24~210s 甚至挂死）。
 // 只在文案层判断，是因为 failclass 只看得到 error。语义同上游维护：这是上游整体不可用，
 // 不是账号问题 —— 换号打的是同一个 backend，冷却只会白关好账号。
 func isDegradedMessage(msg string) bool {

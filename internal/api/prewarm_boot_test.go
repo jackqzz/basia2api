@@ -21,7 +21,9 @@ func TestSelectWarmSetMRU(t *testing.T) {
 		byName[a.Name] = a
 	}
 	byName["acc-b"].RecordUse()
+	time.Sleep(2 * time.Millisecond) // Windows 时钟粒度下必须拉开时间戳，MRU 排序才稳定
 	byName["acc-d"].RecordUse()
+	time.Sleep(2 * time.Millisecond)
 	byName["acc-a"].RecordUse()
 
 	got := selectWarmSet(s.pool.Accounts(), 2, time.Now())

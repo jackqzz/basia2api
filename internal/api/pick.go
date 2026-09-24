@@ -90,7 +90,7 @@ func (it *accountIter) Next() (acc *pool.Account, err error) {
 		if acc != nil {
 			name = acc.Name
 		}
-		log.Printf("prism: sched_pick account=%q tried=%d latency_ms=%d err=%v", name, tried, time.Since(t0).Milliseconds(), err)
+		log.Printf("bps: sched_pick account=%q tried=%d latency_ms=%d err=%v", name, tried, time.Since(t0).Milliseconds(), err)
 	}()
 	if it == nil || it.s == nil {
 		return nil, errors.New("scheduler not configured")

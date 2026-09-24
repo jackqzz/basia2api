@@ -273,6 +273,9 @@ func allBlank(rec []string) bool {
 }
 
 // looksLikeToken 判断是不是已登录凭据（纯 token 导入仍走老路径）。
+// 兼容 bps/ChatGPT 形态：JWT、refresh token（rt.）或 key=value 片段。
 func looksLikeToken(s string) bool {
-	return strings.HasPrefix(s, "eyJ") || strings.Contains(s, "prism_oai_access_token=") || strings.Contains(s, "prism_session_token=")
+	return strings.HasPrefix(s, "eyJ") || strings.HasPrefix(s, "rt.") ||
+		strings.Contains(s, "access_token=") || strings.Contains(s, "refresh_token=") ||
+		strings.Contains(s, "prism_oai_access_token=") || strings.Contains(s, "prism_session_token=")
 }

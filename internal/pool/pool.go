@@ -151,59 +151,9 @@ func (p *Pool) AddAPIKey(name, apiKey string) error {
 	return p.saveLocked(acc)
 }
 
-// StartBrowserLogin 发起浏览器 OAuth 登录，返回登录 URL；后台轮询成功后账号入池并持久化。
+// StartBrowserLogin 已移除浏览器登录：bps 只支持凭据导入（access_token / refresh_token）。
 func (p *Pool) StartBrowserLogin(name string) (string, string, error) {
-	if !nameRe.MatchString(name) {
-		return "", "", fmt.Errorf("invalid account name %q (allowed: [a-zA-Z0-9_-], 1-32 chars)", name)
-	}
-	verifier, challenge, err := auth.GeneratePKCE()
-	if err != nil {
-		return "", "", err
-	}
-	uuid := newUUID()
-	loginURL := auth.LoginURL(p.websiteURL, challenge, uuid)
-
-	baseURL, clientVersion, clientType := p.baseURL, p.clientVersion, p.clientType
-	if clientType == "" {
-		clientType = "ide"
-	}
-	tempID := egress.TempIdentity("login-" + name)
-	stub := &Account{Name: name, ID: tempID}
-	client := p.HTTPClientFor(stub, 30*time.Second)
-	p.mu.Lock()
-	var settings egress.Settings
-	if p.egressFn != nil {
-		settings = p.egressFn(stub)
-	}
-	p.mu.Unlock()
-	go func() {
-		for i := 0; i < 150; i++ {
-			tok, err := auth.PollResult(baseURL, uuid, verifier, clientVersion, clientType, client)
-			if err == nil {
-				if perr := p.SetToken(name, tok); perr != nil {
-					log.Printf("account %q: store token: %v", name, perr)
-					return
-				}
-				if settings.Kind == egress.KindResin {
-					if acc := p.Get(name); acc != nil {
-						if herr := egress.InheritLease(settings.ResinURL, settings.ResinPlatform, tempID, acc.StableIdentity()); herr != nil {
-							log.Printf("account %q inherit resin lease: %v", name, herr)
-						}
-						p.applyAccountEgress(acc)
-					}
-				}
-				log.Printf("account %q login success", name)
-				return
-			}
-			if !auth.IsSessionPending(err) {
-				log.Printf("account %q login poll error: %v", name, err)
-				return
-			}
-			time.Sleep(pollBackoff(i))
-		}
-		log.Printf("account %q login poll timeout", name)
-	}()
-	return loginURL, uuid, nil
+	return "", "", fmt.Errorf("browser login is not supported; import access_token / refresh_token instead")
 }
 
 // SetToken 为账号设置令牌（登录轮询成功后调用）。

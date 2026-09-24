@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""prism-2api 容量探针：一个账号到底能吃多少 RPM（对应 docs/TESTPLAN.md §6）。
+"""bps-2api 容量探针：一个账号到底能吃多少 RPM（对应 docs/TESTPLAN.md §6）。
 
 零依赖，只用标准库。用法：
 
@@ -13,7 +13,7 @@
 
 设计要点（为什么不是一个"并发 50 猛冲"的压测）：
 
-0. **本地不限流**：`prism-2api` 不做任何自设的并发/RPM 闸门
+0. **本地不限流**：`bps-2api` 不做任何自设的并发/RPM 闸门
    （`account_concurrency=0`、`account_concurrency_429=0`、`max_in_flight=0`，全部 = 不限制），
    所以阶梯上测到的失败**都是上游的**，不存在"把自己的限流误读成上游天花板"。
 1. **唯一的账号只有 1 个**，一旦触发上游 429，该号会被冷却
@@ -216,15 +216,15 @@ def fmt_step(r):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="prism-2api 容量探针（见 docs/TESTPLAN.md §6）")
+    ap = argparse.ArgumentParser(description="bps-2api 容量探针（见 docs/TESTPLAN.md §6）")
     ap.add_argument("--steps", default="1,2,4,8,16", help="并发阶梯，逗号分隔（默认 1,2,4,8,16；本地不限流，上限只由上游决定）")
     ap.add_argument("--duration", type=int, default=60, help="每档持续秒数（默认 60）")
     ap.add_argument("--repeat", type=int, default=1, help="每档重复轮数（默认 1，取最好一轮）")
     ap.add_argument("--model", default="gpt-6-astra")
     ap.add_argument("--prompt", default="short", choices=("short", "long"))
     ap.add_argument("--timeout", type=int, default=300, help="单请求超时秒数")
-    ap.add_argument("--admin-user", default=os.environ.get("PRISM_ADMIN_USER", ""))
-    ap.add_argument("--admin-pass", default=os.environ.get("PRISM_ADMIN_PASS", ""))
+    ap.add_argument("--admin-user", default=os.environ.get("BPS_ADMIN_USER", ""))
+    ap.add_argument("--admin-pass", default=os.environ.get("BPS_ADMIN_PASS", ""))
     ap.add_argument("--plan", action="store_true", help="只打印阶梯与请求预算，不发任何请求")
     ap.add_argument("--yes", action="store_true", help="跳过确认（CI/无人值守用）")
     args = ap.parse_args(argv)

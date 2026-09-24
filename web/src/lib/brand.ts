@@ -3,14 +3,14 @@
  * is not enough to finish frontend.
  */
 export const brand = {
-  appName: "prism 2API",
-  logoText: "PR",
+  appName: "bps 2API",
+  logoText: "BP",
   version: "v1.0",
-  primaryColor: "#26251e",
+  primaryColor: "#10a37f",
   githubUrl: "",
-  siteDomain: "https://prism.openai.com",
-  footer: "prism 2API · admin",
-  faviconLetter: "P",
+  siteDomain: "https://bps.openai.com",
+  footer: "bps 2API · admin",
+  faviconLetter: "B",
   locale: "zh-CN",
 } as const;
 

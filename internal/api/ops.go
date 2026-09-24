@@ -163,7 +163,7 @@ func stormFastFail(w http.ResponseWriter, r *http.Request, proto string) bool {
 	if adapter.StormAllow() {
 		return false
 	}
-	const msg = "prism: upstream storm detected, fast fail (please retry shortly)"
+	const msg = "bps: upstream storm detected, fast fail (please retry shortly)"
 	// Retry-After 对齐探测间隔（15s）而非 server 类冷却基准（120s）：风暴是
 	// 分钟级摆动，熔断自己每 15s 探测恢复，客户端（NewAPI 按此 park 渠道）
 	// 也该分钟级回来；120s 会把好分钟也睡过去（2026-09-20 第四场风暴实锤）。
@@ -184,7 +184,7 @@ func stormFastFail(w http.ResponseWriter, r *http.Request, proto string) bool {
 			},
 		})
 	}
-	log.Printf("prism: storm fast-fail %s %s", r.Method, r.URL.Path)
+	log.Printf("bps: storm fast-fail %s %s", r.Method, r.URL.Path)
 	return true
 }
 func handleAdminConfigSchema(w http.ResponseWriter, _ *http.Request) {

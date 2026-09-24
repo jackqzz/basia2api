@@ -17,8 +17,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/web2api ./cmd/server \
- && CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/prism-login ./cmd/login
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/bps2api ./cmd/server
 
 # ---- 运行 ----
 FROM alpine:3.20
@@ -27,8 +26,7 @@ RUN apk add --no-cache ca-certificates tzdata su-exec wget && \
     adduser -D -u 10001 app
 
 WORKDIR /app
-COPY --from=builder /out/web2api /app/web2api
-COPY --from=builder /out/prism-login /app/prism-login
+COPY --from=builder /out/bps2api /app/bps2api
 COPY --from=builder /src/entrypoint.sh /app/entrypoint.sh
 COPY --from=web /web/dist /app/web
 RUN chmod +x /app/entrypoint.sh && \

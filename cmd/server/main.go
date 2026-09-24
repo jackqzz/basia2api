@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"bps-2api/internal/adapter"
-	siteadapter "bps-2api/internal/adapter/prism"
+	siteadapter "bps-2api/internal/adapter/bps"
 	"bps-2api/internal/api"
 	"bps-2api/internal/auth"
 	"bps-2api/internal/config"

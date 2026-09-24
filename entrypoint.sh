@@ -5,7 +5,7 @@ set -e
 if [ "$(id -u)" = "0" ]; then
   mkdir -p /data
   chown -R app:app /data 2>/dev/null || true
-  exec su-exec app /app/web2api "$@"
+  exec su-exec app /app/bps2api "$@"
 fi
 
-exec /app/web2api "$@"
+exec /app/bps2api "$@"

@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"bps-2api/internal/adapter"
-	"bps-2api/internal/adapter/prism"
+	siteadapter "bps-2api/internal/adapter/bps"
 	"bps-2api/internal/auth"
 	"bps-2api/internal/pool"
 )
@@ -155,7 +155,7 @@ func TestResponsesCustomToolCallOutputShape(t *testing.T) {
 func bindMockAdapter(t *testing.T) {
 	t.Helper()
 	prev := adapter.Default
-	adapter.Bind(prism.New(prism.Config{Mock: true}))
+	adapter.Bind(siteadapter.New(siteadapter.Config{Mock: true}))
 	t.Cleanup(func() { adapter.Bind(prev) })
 }
 
@@ -258,7 +258,7 @@ func TestResponsesStreamTurnFailureIsFailedEvent(t *testing.T) {
 	acc := testAccount(t, s)
 	acc.Client = &failingStreamClient{
 		Client: acc.Client,
-		err:    errors.New("prism: upstream sandbox degraded: new backend: context deadline exceeded"),
+		err:    errors.New("bps: upstream sandbox degraded: new backend: context deadline exceeded"),
 	}
 
 	w := responsesPOST(t, s, `{"model":"m","stream":true,"input":[{"type":"message","role":"user","content":"go"}]}`)

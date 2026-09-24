@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# prism-2api 部署：本地源码 → 服务器现场 docker compose build → 重建容器 → 线上验收。
+# bps-2api 部署：本地源码 → 服务器现场 docker compose build → 重建容器 → 线上验收。
 #
 # 用法：
 #   DEPLOY_HOST=YOUR_SERVER_IP DEPLOY_PORT=4344 DEPLOY_USER=root \
@@ -19,7 +19,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEPLOY_HOST="${DEPLOY_HOST:?请设置 DEPLOY_HOST}"
 DEPLOY_USER="${DEPLOY_USER:-root}"
 DEPLOY_PORT="${DEPLOY_PORT:-4344}"
-DEPLOY_PATH="${DEPLOY_PATH:-/opt/prism-2api}"
+DEPLOY_PATH="${DEPLOY_PATH:-/opt/bps-2api}"
 APP_PORT="${APP_PORT:-8301}"
 REV="${REV:-HEAD}"
 TARGET="${DEPLOY_USER}@${DEPLOY_HOST}"
@@ -76,7 +76,7 @@ mark "预检服务器"
 
 echo "[3/5] rsync 源码（保留 .env / data*/，--delete 清理陈旧文件）"
 rsync -az --delete \
-  --exclude '.env' --exclude 'data/' --exclude 'data-pg/' --exclude 'data-mock/' --exclude 'data-login-state/' \
+  --exclude '.env' --exclude 'data/' --exclude 'data-pg/' --exclude 'data-mock/' --exclude '' \
   --exclude '.DS_Store' --exclude 'web/node_modules/' --exclude 'web/dist/' \
   --exclude 'har/' --exclude 'cookies/' --exclude '*.log' \
   --exclude '.codegraph/' --exclude '.cursor/' \
@@ -92,28 +92,28 @@ f=.env
 chmod 600 "$f"
 get() { sed -n "s/^$1=//p" "$f" | head -1; }
 put() { grep -q "^$1=" "$f" || printf '%s=%s\n' "$1" "$2" >> "$f"; }
-put PRISM_HOST_PORT   "${APP_PORT:-8301}"
-put PRISM_DB_USER     prism
-put PRISM_DB_NAME     prism
-put PRISM_DB_PASSWORD "$(openssl rand -hex 16)"
-put PRISM_ENCRYPT_KEY "$(openssl rand -hex 32)"
+put BPS_HOST_PORT   "${APP_PORT:-8301}"
+put BPS_DB_USER     prism
+put BPS_DB_NAME     prism
+put BPS_DB_PASSWORD "$(openssl rand -hex 16)"
+put BPS_ENCRYPT_KEY "$(openssl rand -hex 32)"
 put WEB2API_API_KEY   "$(openssl rand -hex 24)"
 put TZ                Asia/Shanghai
-put PRISM_IMAGE_REPO  "${IMAGE_REPO:-your-dockerhub-user/prism-2api}"
+put BPS_IMAGE_REPO  "${IMAGE_REPO:-your-dockerhub-user/bps-2api}"
 put WEB2API_DEFAULT_MODEL gpt-5.6-sol
 echo "--- .env（密钥略）---"
-sed -E 's/^(PRISM_DB_PASSWORD|PRISM_ENCRYPT_KEY|WEB2API_API_KEY)=.*/\1=***/' "$f"
+sed -E 's/^(BPS_DB_PASSWORD|BPS_ENCRYPT_KEY|WEB2API_API_KEY)=.*/\1=***/' "$f"
 BOOTSTRAP
 mark "引导 .env"
 
 echo "[5/5] 现场 build + 重建容器${BUILD_FLAGS:+（NO_CACHE=1，不用缓存）}"
-"${SSH[@]}" "$TARGET" "cd '$DEPLOY_PATH' && docker compose build ${BUILD_FLAGS[@]+"${BUILD_FLAGS[@]}"} prism-2api prism-login && docker compose up -d && docker compose ps --format '{{.Name}} {{.Status}} {{.Ports}}'"
+"${SSH[@]}" "$TARGET" "cd '$DEPLOY_PATH' && docker compose build ${BUILD_FLAGS[@]+"${BUILD_FLAGS[@]}"} bps-2api && docker compose up -d && docker compose ps --format '{{.Name}} {{.Status}} {{.Ports}}'"
 mark "build + 重建容器"
 
 echo "--- 等健康 ---"
 "${SSH[@]}" "$TARGET" "cd '$DEPLOY_PATH' && for i in \$(seq 1 40); do \
-    docker inspect -f '{{.State.Health.Status}}' prism-2api 2>/dev/null | grep -q healthy && break; sleep 3; done; \
-  docker inspect -f 'prism-2api health={{.State.Health.Status}}' prism-2api"
+    docker inspect -f '{{.State.Health.Status}}' bps-2api 2>/dev/null | grep -q healthy && break; sleep 3; done; \
+  docker inspect -f 'bps-2api health={{.State.Health.Status}}' bps-2api"
 mark "等健康"
 
 AUTH="$("${SSH[@]}" "$TARGET" "sed -n 's/^WEB2API_API_KEY=//p' '$DEPLOY_PATH/.env' | head -1")"

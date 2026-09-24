@@ -97,7 +97,7 @@ func TestStreamChatEmptyCompletionExhaustedIsError(t *testing.T) {
 
 	w := chatCompletionsPOST(t, s, `{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
 	body := w.Body.String()
-	if !strings.Contains(body, "prism: upstream returned empty completion") {
+	if !strings.Contains(body, "bps: upstream returned empty completion") {
 		t.Fatalf("终态应带 empty completion 错误帧:\n%s", body)
 	}
 	if !strings.Contains(body, `"upstream_error"`) {

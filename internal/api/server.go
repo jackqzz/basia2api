@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -231,7 +232,14 @@ func (s *Server) openStore(cfg *config.Config) (persist.Backend, error) {
 		log.Printf("mock mode without DATABASE_URL: in-memory store only")
 		return backend, nil
 	}
-	return nil, fmt.Errorf("DATABASE_URL / WEB2API_DATABASE_URL is required; PostgreSQL is the only durable store")
+	// 无 PostgreSQL：退化为本地 JSON 文件后端（单机部署），语义与内存后端一致。
+	fileDir := filepath.Join(cfg.CredentialDir, "state")
+	backend := persist.NewFile(fileDir)
+	if _, err := persist.ImportLegacyDir(backend, cfg.CredentialDir); err != nil {
+		return nil, fmt.Errorf("import legacy json: %w", err)
+	}
+	log.Printf("no DATABASE_URL: using JSON file store at %s", fileDir)
+	return backend, nil
 }
 
 // poolClient 从账号池选一个可用账号的客户端（模型加载用）。
@@ -540,7 +548,7 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, req *ChatCom
 
 	tPick0 := time.Now()
 	acc, err := iter.Next()
-	log.Printf("prism: t_pick attempt=0 account=%q inflight=%d latency_ms=%d err=%v", accName(acc), accInflight(acc), time.Since(tPick0).Milliseconds(), err)
+	log.Printf("bps: t_pick attempt=0 account=%q inflight=%d latency_ms=%d err=%v", accName(acc), accInflight(acc), time.Since(tPick0).Milliseconds(), err)
 	if err != nil {
 		writePickError(w, err, false)
 		return
@@ -569,7 +577,7 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, req *ChatCom
 			// 把客户端吊到 NewAPI 渠道超时（180s/300s）变成 client_gone——不如在
 			// 预算内返回干净的上游错误，客户可立即重试（线上 2026-09-20 实锤）。
 			if b := retryBudget(); b > 0 && time.Since(start) > b {
-				msg := "prism: upstream too slow, retry budget exhausted (please retry)"
+				msg := "bps: upstream too slow, retry budget exhausted (please retry)"
 				if entry != nil {
 					entry.Error = msg
 				}
@@ -587,7 +595,7 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, req *ChatCom
 			}
 			tPick := time.Now()
 			acc, err = iter.Next()
-			log.Printf("prism: t_pick attempt=%d account=%q inflight=%d latency_ms=%d err=%v", attempt, accName(acc), accInflight(acc), time.Since(tPick).Milliseconds(), err)
+			log.Printf("bps: t_pick attempt=%d account=%q inflight=%d latency_ms=%d err=%v", attempt, accName(acc), accInflight(acc), time.Since(tPick).Milliseconds(), err)
 			if err != nil {
 				// 无可用账号：SSE 头已发出，输出错误帧后结束
 				// （acc 为 nil，上一个账号已在上面 Release，不能在这里再 Release）
@@ -784,8 +792,8 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, req *ChatCom
 			if agentReq.Extra == nil {
 				agentReq.Extra = map[string]any{}
 			}
-			agentReq.Extra["prism_tool_reinforce"] = "1"
-			agentReq.Extra["prism_tool_reinforce_bad"] = pendingText.String()
+			agentReq.Extra["bps_tool_reinforce"] = "1"
+			agentReq.Extra["bps_tool_reinforce_bad"] = pendingText.String()
 			streamErr = runRound()
 		}
 		// 交付追捞重试：假交付事故（声称写文件+正文缺内容，不限是否有 tools）或无 tools 时
@@ -798,8 +806,8 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, req *ChatCom
 				if agentReq.Extra == nil {
 					agentReq.Extra = map[string]any{}
 				}
-				agentReq.Extra["prism_delivery_salvage"] = mode
-				agentReq.Extra["prism_delivery_salvage_bad"] = pendingText.String()
+				agentReq.Extra["bps_delivery_salvage"] = mode
+				agentReq.Extra["bps_delivery_salvage_bad"] = pendingText.String()
 				streamErr = runRound()
 				// 观测：追捞轮是否真把内容带回来了（still-accident 时下方剪除护栏兜底）。
 				if streamErr == nil {
@@ -826,7 +834,7 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, req *ChatCom
 				continue
 			}
 			log.Printf("chat stream empty completion exhausted after %d retries account=%s model=%s", emptyRetryMax, acc.Name, req.Model)
-			msg := "prism: upstream returned empty completion"
+			msg := "bps: upstream returned empty completion"
 			if entry != nil {
 				entry.Error = msg
 			}
@@ -975,11 +983,11 @@ func (s *Server) nonStreamChat(w http.ResponseWriter, r *http.Request, req *Chat
 			// 重试总预算（同流式路径）：预算内返回干净错误，不吊死客户端到渠道超时。
 			if b := retryBudget(); b > 0 && time.Since(start) > b {
 				if entry != nil {
-					entry.Error = "prism: retry budget exhausted"
+					entry.Error = "bps: retry budget exhausted"
 				}
 				acc.Release()
 				writeOpenAIClassError(w, failclass.Result{Class: failclass.Server},
-					"prism: upstream too slow, retry budget exhausted (please retry)")
+					"bps: upstream too slow, retry budget exhausted (please retry)")
 				return
 			}
 			acc, err = iter.Next()
@@ -1049,8 +1057,8 @@ func (s *Server) nonStreamChat(w http.ResponseWriter, r *http.Request, req *Chat
 			if agentReq.Extra == nil {
 				agentReq.Extra = map[string]any{}
 			}
-			agentReq.Extra["prism_tool_reinforce"] = "1"
-			agentReq.Extra["prism_tool_reinforce_bad"] = text.String()
+			agentReq.Extra["bps_tool_reinforce"] = "1"
+			agentReq.Extra["bps_tool_reinforce_bad"] = text.String()
 			streamErr = runRound()
 		}
 		// 交付追捞重试：假交付事故（不限 tools）或无 tools 时翻自己环境后拒绝，同账号加
@@ -1062,8 +1070,8 @@ func (s *Server) nonStreamChat(w http.ResponseWriter, r *http.Request, req *Chat
 				if agentReq.Extra == nil {
 					agentReq.Extra = map[string]any{}
 				}
-				agentReq.Extra["prism_delivery_salvage"] = mode
-				agentReq.Extra["prism_delivery_salvage_bad"] = text.String()
+				agentReq.Extra["bps_delivery_salvage"] = mode
+				agentReq.Extra["bps_delivery_salvage_bad"] = text.String()
 				streamErr = runRound()
 				if streamErr == nil {
 					switch {
@@ -1089,7 +1097,7 @@ func (s *Server) nonStreamChat(w http.ResponseWriter, r *http.Request, req *Chat
 				continue
 			}
 			log.Printf("chat empty completion exhausted after %d retries account=%s model=%s", emptyRetryMax, acc.Name, req.Model)
-			msg := "prism: upstream returned empty completion"
+			msg := "bps: upstream returned empty completion"
 			if entry != nil {
 				entry.Error = msg
 			}
@@ -1192,24 +1200,10 @@ func (s *Server) nonStreamChat(w http.ResponseWriter, r *http.Request, req *Chat
 	}
 }
 
-// handleLogin 发起浏览器登录（账号池模式），返回登录 URL；后台轮询成功后账号入池并持久化。
-// GET /v1/login → 默认账号 "default"；GET /v1/login?name=xxx → 指定账号名。
+// handleLogin bps 不支持浏览器登录：请改用凭据导入（access_token / refresh_token）。
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	name := r.URL.Query().Get("name")
-	if name == "" {
-		name = "default"
-	}
-	url, uuid, err := s.pool.StartBrowserLogin(name)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"message": err.Error()}})
-		return
-	}
-	if s.cfg.OpenBrowser {
-		openBrowser(url)
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"login_url": url, "uuid": uuid, "name": name,
-		"message": "open the URL in a browser and complete login; tokens will be stored automatically",
+	writeJSON(w, http.StatusBadRequest, map[string]any{
+		"error": map[string]string{"message": "browser login is not supported; import access_token / refresh_token instead"},
 	})
 }
 
@@ -1306,12 +1300,7 @@ func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]any{"name": name, "logged_in": true})
 			return
 		}
-		url, uuid, err := s.pool.StartBrowserLogin(name)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"message": err.Error()}})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"name": name, "login_url": url, "uuid": uuid})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"message": "access_token / refresh_token is required (browser login is not supported)"}})
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"message": "method not allowed"}})
 	}

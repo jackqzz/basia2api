@@ -99,7 +99,7 @@ def fetch_logs(since_min=20):
         "sshpass", "-p", sshpass, "ssh", "-p", port,
         "-o", "StrictHostKeyChecking=no", "-o", "ControlMaster=no",
         f"{user}@{host}",
-        f"docker logs --since {since_min}m prism-2api 2>&1 | "
+        f"docker logs --since {since_min}m bps-2api 2>&1 | "
         "grep -E 'prism: (start|turn|t_pick|sched_pick|status poll)' | tail -120",
     ]
     try:

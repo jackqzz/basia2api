@@ -4,15 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	siteadapter "bps-2api/internal/adapter/prism"
 	"bps-2api/internal/adminapi"
-	"bps-2api/internal/auth"
 	"bps-2api/internal/pool"
 	"bps-2api/internal/tasks"
 )
@@ -149,19 +145,10 @@ func (s *Server) handleAdminAccountActions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	names := append([]string(nil), body.Names...)
-	method := strings.TrimSpace(body.Method)
 	if body.Action == "login" {
-		t := s.jobs.Enqueue(tasks.CreateRequest{
-			Type:       "accounts.login",
-			Title:      fmt.Sprintf("登录 %d 个账号", len(names)),
-			Total:      len(names),
-			Cancelable: true,
-			Meta:       map[string]any{"action": body.Action, "names": names, "method": method},
-			Run: func(ctx *tasks.Context) (any, error) {
-				return s.runAccountLogin(ctx, names, method)
-			},
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": "浏览器登录已移除：请导入 ChatGPT 凭据（access_token / refresh_token），token 过期会自动续期",
 		})
-		writeJSON(w, http.StatusAccepted, map[string]any{"task": t})
 		return
 	}
 	t := s.jobs.Enqueue(tasks.CreateRequest{
@@ -196,163 +183,6 @@ func accountActionTitle(action string, n int) string {
 	}
 }
 
-// runAccountLogin 选中账号 → 在服务端（或远端侧车）跑登录 → 写回号池。
-// 凭据来源是池内已存的凭据束（导入 CSV 时写进 RefreshToken）；没有凭据束就没法登录。
-func (s *Server) runAccountLogin(ctx *tasks.Context, names []string, method string) (any, error) {
-	type item struct {
-		Name   string `json:"name"`
-		OK     bool   `json:"ok"`
-		Detail string `json:"detail,omitempty"`
-	}
-	out := make([]item, len(names))
-	sem := make(chan struct{}, maxInt(1, s.loginConcurrency(method)))
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	okN, failN := 0, 0
-
-	for i, name := range names {
-		if err := ctx.Err(); err != nil {
-			return map[string]any{"items": out, "ok": okN, "failed": failN}, err
-		}
-		acc := s.pool.Get(name)
-		if acc == nil {
-			out[i] = item{Name: name, Detail: "账号不存在"}
-			failN++
-			ctx.Error(name + ": 账号不存在")
-			continue
-		}
-		bundle := siteadapter.ParseCredentialBundle(tokenRefresh(acc))
-		if bundle == nil || !bundle.CanRelogin() {
-			out[i] = item{Name: name, Detail: "没有登录材料（缺邮箱/密码），无法登录"}
-			failN++
-			ctx.Error(name + ": 缺少登录材料")
-			continue
-		}
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(i int, name string, b *siteadapter.CredentialBundle) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			ctx.Info(name + ": 开始登录（" + backendLabel(b, method) + "）")
-			start := time.Now()
-			res, err := siteadapter.RunSidecarLogin(ctx.Context(), siteadapter.LoginRequest{
-				Email:      b.Email,
-				Password:   b.Password,
-				TOTPSecret: b.TOTP,
-				Proxy:      b.Proxy,
-				Backend:    backendFor(b, method),
-				Headless:   true, // 容器里靠 xvfb 提供显示
-				Timeout:    240,
-			}, func(state, detail string) {
-				if detail == "" || detail == state {
-					ctx.Info(fmt.Sprintf("%s: %s", name, state))
-					return
-				}
-				ctx.Info(fmt.Sprintf("%s: %s %s", name, state, detail))
-			})
-			mu.Lock()
-			defer mu.Unlock()
-			if err != nil {
-				out[i] = item{Name: name, Detail: err.Error()}
-				failN++
-				ctx.Error(fmt.Sprintf("%s: 登录失败（%s）: %v", name, time.Since(start).Round(time.Second), err))
-				return
-			}
-			tok := &auth.Token{AccessToken: res.OAI, APIKey: res.OAI, RefreshToken: bundleWithResult(b, res).Marshal()}
-			if err := s.pool.SetToken(name, tok); err != nil {
-				out[i] = item{Name: name, Detail: "入库失败: " + err.Error()}
-				failN++
-				ctx.Error(name + ": 入库失败: " + err.Error())
-				return
-			}
-			s.setAccountEnabled(name, true)
-			out[i] = item{Name: name, OK: true, Detail: fmt.Sprintf("登录成功（%s）", time.Since(start).Round(time.Second))}
-			okN++
-			ctx.Info(fmt.Sprintf("%s: 登录成功并入库（%s）", name, time.Since(start).Round(time.Second)))
-		}(i, name, bundle)
-		ctx.Progress(i+1, len(names), "")
-	}
-	wg.Wait()
-	result := map[string]any{"items": out, "ok": okN, "failed": failN}
-	if failN > 0 && okN == 0 {
-		return result, fmt.Errorf("%d 个账号登录失败", failN)
-	}
-	return result, nil
-}
-
-// bundleWithResult 把本次登录产出的 cookie/state 回填进凭据束，便于下次复登复用设备指纹。
-func bundleWithResult(b *siteadapter.CredentialBundle, res *siteadapter.LoginResult) *siteadapter.CredentialBundle {
-	next := *b
-	next.OAI = res.OAI
-	next.Refresh = res.Refresh
-	if res.StorageState != "" {
-		next.StatePath = res.StorageState
-	}
-	return &next
-}
-
-// backendFor 决定用哪个侧车后端：method=auto 时协议优先（未接入前等同 browser）。
-func backendFor(b *siteadapter.CredentialBundle, method string) string {
-	if b.Backend != "" {
-		return b.Backend
-	}
-	switch strings.ToLower(strings.TrimSpace(method)) {
-	case "protocol":
-		return "protocol"
-	default:
-		return "browser"
-	}
-}
-
-func backendLabel(b *siteadapter.CredentialBundle, method string) string {
-	if b.Backend != "" {
-		return b.Backend
-	}
-	return backendFor(b, method)
-}
-
-// loginConcurrency 登录很重（一个浏览器一份内存）：浏览器默认 2、协议路径 4，
-// 可用 PRISM_LOGIN_CONCURRENCY 覆盖。
-func (s *Server) loginConcurrency(method string) int {
-	if v := strings.TrimSpace(os.Getenv("PRISM_LOGIN_CONCURRENCY")); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return n
-		}
-	}
-	if strings.EqualFold(strings.TrimSpace(method), "protocol") {
-		return 4
-	}
-	return 2
-}
-
-// setAccountEnabled 登录成功后把账号启用（导入时是停用状态）。
-func (s *Server) setAccountEnabled(name string, enabled bool) {
-	if s.pool == nil {
-		return
-	}
-	if acc := s.pool.Get(name); acc != nil {
-		acc.ApplyAdminPatch(pool.AdminPatch{Enabled: &enabled})
-		s.pool.RefreshAccountEgress(acc)
-	}
-}
-
-// tokenRefresh 取账号当前存的刷新令牌（= 凭据束 JSON）。
-func tokenRefresh(acc *pool.Account) string {
-	if acc == nil || acc.Tokens == nil {
-		return ""
-	}
-	if tok := acc.Tokens.Current(); tok != nil {
-		return tok.RefreshToken
-	}
-	return ""
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
 
 func (s *Server) runAccountBatch(ctx *tasks.Context, action string, names []string, proxyID *string) (any, error) {
 	type item struct {

@@ -92,13 +92,13 @@ func TestLoadOrCreateYAMLSibling(t *testing.T) {
 	}
 }
 
-func TestPromptDefaultsToInject(t *testing.T) {
+func TestPromptDefaultsToOff(t *testing.T) {
 	rc := Default("https://x", "https://y", "", "127.0.0.1:0", true)
-	if !rc.PromptEnabled() {
-		t.Fatal("默认应注入")
+	if rc.PromptEnabled() {
+		t.Fatal("bps 默认不注入（上游自带 agent 提示词）")
 	}
 	if rc.PromptText() != "" {
-		t.Fatalf("默认文案应为空（回内置默认），got %q", rc.PromptText())
+		t.Fatalf("默认文案应为空，got %q", rc.PromptText())
 	}
 	if !rc.IdentityGuardOn() {
 		t.Fatal("身份闸默认应开")
@@ -106,15 +106,15 @@ func TestPromptDefaultsToInject(t *testing.T) {
 }
 
 func TestPromptEnvSeeding(t *testing.T) {
-	t.Setenv("PRISM_SYSTEM_PROMPT", "off")
+	t.Setenv("BPS_SYSTEM_PROMPT", "off")
 	rc := Default("https://x", "https://y", "", "127.0.0.1:0", true)
 	if rc.PromptEnabled() {
-		t.Fatal("PRISM_SYSTEM_PROMPT=off 应播种为关")
+		t.Fatal("BPS_SYSTEM_PROMPT=off 应播种为关")
 	}
 }
 
 func TestPromptEnvTextSeeding(t *testing.T) {
-	t.Setenv("PRISM_SYSTEM_PROMPT", `第一行\n第二行`)
+	t.Setenv("BPS_SYSTEM_PROMPT", `第一行\n第二行`)
 	rc := Default("https://x", "https://y", "", "127.0.0.1:0", true)
 	if got := rc.PromptText(); got != "第一行\n第二行" {
 		t.Fatalf("env 文案应播种并还原换行，got %q", got)

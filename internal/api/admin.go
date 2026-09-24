@@ -311,12 +311,7 @@ func (s *Server) handleAdminAccounts(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]any{"name": name, "logged_in": true})
 			return
 		}
-		url, uuid, err := s.pool.StartBrowserLogin(name)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"message": err.Error()}})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"name": name, "login_url": url, "uuid": uuid})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"message": "access_token / refresh_token is required (browser login is not supported)"}})
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"message": "method not allowed"}})
 	}

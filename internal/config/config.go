@@ -38,15 +38,15 @@ type Config struct {
 func Default() *Config {
 	c := &Config{
 		ListenAddr:    "127.0.0.1:8080",
-		APIBaseURL:    "https://api.example.com",
-		WebsiteURL:    "https://example.com",
-		ClientVersion: "1.0.0",
-		ClientType:    "web",
+		APIBaseURL:    "https://bps.openai.com/basispoints/api",
+		WebsiteURL:    "https://bps.openai.com",
+		ClientVersion: "0.153.4",
+		ClientType:    "chatgpt",
 		CredentialDir: credentialDir(),
 		MockAddr:      "127.0.0.1:9100",
 		Timeout:       120 * time.Second,
-		OpenBrowser:   true,
-		DefaultModel:  "vendor-default",
+		OpenBrowser:   false,
+		DefaultModel:  "gpt-5.6-sol",
 		ModelMap:      make(map[string]string),
 	}
 	if v := os.Getenv("VENDOR_API_BASE_URL"); v != "" {

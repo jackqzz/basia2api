@@ -86,15 +86,23 @@ func ParseImportLine(line string) (AccountImport, error) {
 	if len(parts) == 1 {
 		access, session := pickTokens(line)
 		if access == "" && session == "" {
+			if rt := pickRefreshToken(line); rt != "" {
+				in.RefreshToken = rt
+				return in, nil
+			}
 			return AccountImport{}, fmt.Errorf("no session token")
 		}
 		in.AccessToken, in.SessionToken = access, session
+		in.RefreshToken = pickRefreshToken(line)
 		return in, nil
 	}
 	for _, p := range parts {
 		p = strings.TrimSpace(p)
 		if p == "" {
 			continue
+		}
+		if rt := pickRefreshToken(p); rt != "" && in.RefreshToken == "" {
+			in.RefreshToken = rt
 		}
 		access, session := pickTokens(p)
 		if access != "" || session != "" {
@@ -110,10 +118,31 @@ func ParseImportLine(line string) (AccountImport, error) {
 			in.Email = p
 		}
 	}
-	if in.AccessToken == "" && in.SessionToken == "" {
+	if in.AccessToken == "" && in.SessionToken == "" && in.RefreshToken == "" {
 		return AccountImport{}, fmt.Errorf("no session token")
 	}
 	return in, nil
+}
+
+// pickRefreshToken 从一段文本里提取 ChatGPT refresh token（rt.xxx 或 refresh_token=rt.xxx）。
+func pickRefreshToken(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if strings.HasPrefix(raw, "rt.") {
+		if i := strings.IndexAny(raw, ";\"\n\r\t ,}"); i > 0 {
+			return strings.TrimSpace(raw[:i])
+		}
+		return raw
+	}
+	if i := strings.Index(raw, "refresh_token="); i >= 0 {
+		v := raw[i+len("refresh_token="):]
+		if j := strings.IndexAny(v, ";\"\n\r\t ,}"); j >= 0 {
+			v = v[:j]
+		}
+		if v = strings.TrimSpace(v); strings.HasPrefix(v, "rt.") {
+			return v
+		}
+	}
+	return ""
 }
 
 // pickTokens 从一段文本里挑出访问令牌与会话令牌。
