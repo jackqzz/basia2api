@@ -152,7 +152,7 @@ func (c *httpClient) Stream(ctx context.Context, nr *adapter.NativeRequest, emit
 			}
 			return upErr
 		}
-		err = consumeSSE(resp.Body, emit)
+		err = consumeSSE(resp.Body, emit, nr.Tools)
 		resp.Body.Close()
 		if err == errClientGone {
 			return nil // 客户端主动断开：不算上游失败
@@ -197,6 +197,25 @@ func (c *httpClient) do(ctx context.Context, sec Secret, body []byte) (*http.Res
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("OpenAI-Beta", "responses=experimental")
+	// Excel 插件客户端画像：服务端按画像注入系统提示词+工具集。
+	// run_officejs 传输通道只在 excel 画像下注入（codex-tui 画像没有它，
+	// 客户端工具目录就会无 transport 可用）。与官方插件/bridge 同款默认值。
+	req.Header.Set("x-openai-internal-basispoints-client-agent-profile", "excel")
+	req.Header.Set("x-openai-internal-basispoints-client-editor", "excel")
+	req.Header.Set("x-openai-internal-basispoints-client-host", "office")
+	req.Header.Set("x-openai-internal-basispoints-client-platform", "excel")
+	req.Header.Set("x-openai-internal-basispoints-client-platform-class", "PC")
+	req.Header.Set("x-openai-internal-basispoints-client-product", "basispoints-excel-plugin")
+	req.Header.Set("x-openai-internal-basispoints-client-runtime", "desktop")
+	req.Header.Set("x-openai-internal-basispoints-office-host", "Excel")
+	req.Header.Set("x-openai-internal-basispoints-office-platform", "PC")
+	req.Header.Set("x-stainless-lang", "js")
+	req.Header.Set("x-stainless-package-version", "6.31.0")
+	req.Header.Set("x-stainless-runtime", "browser:chrome")
+	req.Header.Set("x-stainless-arch", "unknown")
+	req.Header.Set("x-stainless-os", "Unknown")
+	req.Header.Set("x-stainless-retry-count", "0")
+	req.Header.Set("origin", "https://bps.openai.com")
 	req.Header.Set("originator", "codex-tui")
 	req.Header.Set("version", firstNonEmpty(strings.TrimSpace(c.clientVersion), defaultClientVersion))
 	req.Header.Set("User-Agent", c.userAgent())
@@ -208,16 +227,15 @@ func (c *httpClient) ListModels(ctx context.Context) ([]adapter.ModelInfo, error
 	return nil, adapter.ErrNotImplemented
 }
 
-// FetchUsage 用量页快照：不请求上游，直接用 token 载荷里的身份/套餐信息。
-// TODO: 需要额度百分比时接 chatgpt.com/backend-api/wham/usage（见 docs/TODO）。
+// whamUsageURL 是 ChatGPT 官方额度接口（与网页端/codex 同一数据源）。
+const whamUsageURL = "https://chatgpt.com/backend-api/wham/usage"
+
+// FetchUsage 用量页快照：先打 wham/usage 拿真实额度（rate_limit 窗口/credits），
+// 失败则回退到 token 载荷里的身份/套餐信息。
 func (c *httpClient) FetchUsage(ctx context.Context, websiteURL string) (adapter.UsageSnapshot, error) {
-	raw, err := c.token()
+	sec, err := c.credential()
 	if err != nil {
 		return adapter.UsageSnapshot{}, err
-	}
-	sec := ParseSecret(raw)
-	if sec.AccessToken == "" {
-		return adapter.UsageSnapshot{}, fmt.Errorf("bps: credential missing access token")
 	}
 	snap := adapter.UsageSnapshot{
 		Email:          sec.Email,
@@ -228,5 +246,104 @@ func (c *httpClient) FetchUsage(ctx context.Context, websiteURL string) (adapter
 	if snap.Email == "" {
 		snap.Email = Email(sec.AccessToken)
 	}
+	if err := c.fillWhamUsage(ctx, sec, &snap); err != nil {
+		return snap, err
+	}
 	return snap, nil
 }
+
+// whamWindow 是 rate_limit 下的单个限流窗口（5h 主窗 / 周窗）。
+type whamWindow struct {
+	UsedPercent       float64 `json:"used_percent"`
+	LimitWindowSecs   int64   `json:"limit_window_seconds"`
+	ResetAfterSeconds int64   `json:"reset_after_seconds"`
+}
+
+// fillWhamUsage 请求 wham/usage 并把额度字段填进快照。
+// primary_window（短窗）→ Auto，secondary_window（长窗）→ API，
+// TotalPercentUsed 取两者峰值（额度满时 QuotaDisableReason 能正确熔断账号）。
+func (c *httpClient) fillWhamUsage(ctx context.Context, sec Secret, snap *adapter.UsageSnapshot) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, whamUsageURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+sec.AccessToken)
+	req.Header.Set("chatgpt-account-id", sec.AccountID)
+	req.Header.Set("x-openai-account-id", sec.AccountID)
+	req.Header.Set("x-basispoints-auth-mode", "chatgpt")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("originator", "codex-tui")
+	req.Header.Set("User-Agent", c.userAgent())
+	resp, err := c.httpClientRef().Do(req)
+	if err != nil {
+		return fmt.Errorf("wham/usage: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<10))
+		return fmt.Errorf("wham/usage: status %d: %s", resp.StatusCode, truncate(strings.TrimSpace(string(raw)), 200))
+	}
+	var w struct {
+		Email     string `json:"email"`
+		UserID    string `json:"user_id"`
+		PlanType  string `json:"plan_type"`
+		RateLimit struct {
+			Allowed          bool        `json:"allowed"`
+			LimitReached     bool        `json:"limit_reached"`
+			PrimaryWindow    *whamWindow `json:"primary_window"`
+			SecondaryWindow  *whamWindow `json:"secondary_window"`
+		} `json:"rate_limit"`
+		Credits struct {
+			HasCredits bool `json:"has_credits"`
+			Unlimited  bool `json:"unlimited"`
+		} `json:"credits"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&w); err != nil {
+		return fmt.Errorf("wham/usage: decode: %w", err)
+	}
+	if w.Email != "" {
+		snap.Email = w.Email
+	}
+	// wham 的 user_id 是成员级身份（account_id 是 workspace 级、全 team 共享，
+	// 不能当身份用）——写进 WorkOSID 供 FindDuplicate 判重。
+	if w.UserID != "" {
+		snap.WorkOSID = w.UserID
+	}
+	if w.PlanType != "" {
+		snap.PlanLabel = w.PlanType
+		snap.IndividualPlan = w.PlanType
+	}
+	var peak float64
+	if pw := w.RateLimit.PrimaryWindow; pw != nil {
+		v := pw.UsedPercent
+		snap.AutoPercentUsed = &v
+		peak = v
+	}
+	if sw := w.RateLimit.SecondaryWindow; sw != nil {
+		v := sw.UsedPercent
+		snap.APIPercentUsed = &v
+		if v > peak {
+			peak = v
+		}
+		if sw.ResetAfterSeconds > 0 {
+			snap.BillingCycleEnd = time.Now().Unix() + sw.ResetAfterSeconds
+		}
+	}
+	if w.RateLimit.PrimaryWindow != nil || w.RateLimit.SecondaryWindow != nil {
+		if w.RateLimit.LimitReached && peak < quotaHardLimit {
+			peak = quotaHardLimit
+		}
+		snap.TotalPercentUsed = &peak
+	}
+	if w.Credits.Unlimited {
+		snap.Unlimited = true
+	}
+	if w.Credits.HasCredits {
+		on := true
+		snap.OnDemandEnabled = &on
+	}
+	return nil
+}
+
+// quotaHardLimit 触发限流熔断的百分比（与 adapter.quotaFullPercent 对齐）。
+const quotaHardLimit = 100.0

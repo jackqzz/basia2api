@@ -6,7 +6,9 @@ import type {
   Dashboard,
   Group,
   LogEntry,
+  MetricsSnapshot,
   ModelRow,
+  PoolAccount,
   ProxyItem,
   SchemaField,
   TaskItem,
@@ -67,7 +69,7 @@ export const adminApi = {
 
   accounts: () => api<{ accounts: Account[]; total: number }>("/api/admin/accounts"),
   account: (name: string) => api<AccountDetail>(`/api/admin/accounts/${encodeURIComponent(name)}`),
-  createAccount: (body: { name?: string; email?: string; api_key?: string; access_token?: string; session_token?: string }) =>
+  createAccount: (body: { name?: string; email?: string; api_key?: string; access_token?: string; session_token?: string; refresh_token?: string }) =>
     api<{ name: string; login_url?: string; uuid?: string; logged_in?: boolean }>("/api/admin/accounts", {
       method: "POST",
       body: JSON.stringify(body),
@@ -150,6 +152,9 @@ export const adminApi = {
   tasks: () => api<{ tasks: TaskItem[]; total: number; concurrency: number }>("/api/admin/tasks"),
   task: (id: string) => api<TaskItem>(`/api/admin/tasks/${id}`),
   cancelTask: (id: string) => api(`/api/admin/tasks/${id}/cancel`, { method: "POST" }),
+
+  poolAccounts: () => api<{ accounts: PoolAccount[]; total: number }>("/api/admin/pool/accounts"),
+  metrics: () => api<MetricsSnapshot>("/api/admin/metrics"),
 
   emulation: () => api<EmulationState>("/api/admin/emulation"),
   updateEmulation: (config: EmulationConfig) =>

@@ -1,7 +1,6 @@
 package bps
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -14,7 +13,7 @@ import (
 // instructions 由上游注入，客户端 system 消息作为 input item 传递。
 // ============================================================
 
-// mapChat 组装站点原生请求；task/turn 在这一次逻辑请求内固定（重试复用）。
+// mapChat 组装站点原生请求；task/turn 由消息内容派生（重试/多轮稳定）。
 func mapChat(req adapter.ChatRequest) (*adapter.NativeRequest, error) {
 	nr := &adapter.NativeRequest{
 		Model:        req.Model,
@@ -25,32 +24,39 @@ func mapChat(req adapter.ChatRequest) (*adapter.NativeRequest, error) {
 		MaxTokens:    req.MaxTokens,
 		Thinking:     req.ReasoningEffort,
 		SystemPrompt: req.SystemPrompt,
-		Extra: map[string]any{
-			"task_id": newID(),
-			"turn_id": newID(),
-		},
+		Extra:        map[string]any{},
 	}
 	return nr, nil
 }
 
 // buildRequestBody 生成 POST /responses 的 JSON body。
+// 上游白名单契约：客户端 tools 一律 422，改走 run_officejs 传输层（见 toolrelay.go）。
+// model_selection=explicit 让请求模型真正生效（否则上游静默兜底默认模型）。
 func buildRequestBody(nr *adapter.NativeRequest) map[string]any {
+	conversation := conversationFingerprint(nr.Messages, nr.SystemPrompt)
+	turnFp, iteration := turnState(nr.Messages)
+	metadata := map[string]any{
+		"task_id":         extraString(nr, "task_id"),
+		"turn_id":         extraString(nr, "turn_id"),
+		"agent_iteration": iteration,
+	}
+	if metadata["task_id"] == "" {
+		metadata["task_id"] = uuid5("bps-2api/gpt-excel/" + conversation)
+	}
+	if metadata["turn_id"] == "" {
+		metadata["turn_id"] = uuid5("bps-2api/gpt-excel/" + conversation + "/turn/" + turnFp)
+	}
 	body := map[string]any{
-		"model":  resolveModel(nr.Model),
-		"input":  buildInput(nr),
-		"stream": true,
+		"model":           resolveModel(nr.Model),
+		"model_selection": "explicit",
+		"input":           buildInput(nr),
+		"stream":          true,
 		// 上游是 Excel 插件 agent，store 固定 false（与官方客户端一致）。
-		"store": false,
-		"metadata": map[string]any{
-			"task_id": extraString(nr, "task_id"),
-			"turn_id": extraString(nr, "turn_id"),
-		},
+		"store":    false,
+		"metadata": metadata,
 	}
 	if effort := reasoningEffort(nr); effort != "" {
 		body["reasoning"] = map[string]any{"effort": effort}
-	}
-	if tools := buildTools(nr.Tools); len(tools) > 0 {
-		body["tools"] = tools
 	}
 	return body
 }
@@ -67,9 +73,11 @@ func extraString(nr *adapter.NativeRequest, key string) string {
 }
 
 // buildInput 把消息列表摊成 Responses input items：
-// system 合并成一条放最前；assistant 文本 + function_call；tool 结果 → function_call_output。
+// system 合并成一条放最前；随后是工具目录/提醒 developer 消息（run_officejs
+// 传输层协议，稳定前缀利于上游 prompt cache）；assistant 文本 + function_call
+// 历史改写成 run_officejs envelope；tool 结果 → function_call_output。
 func buildInput(nr *adapter.NativeRequest) []any {
-	items := make([]any, 0, len(nr.Messages)+2)
+	items := make([]any, 0, len(nr.Messages)+4)
 	sys := make([]string, 0, 2)
 	if s := strings.TrimSpace(nr.SystemPrompt); s != "" {
 		sys = append(sys, s)
@@ -83,6 +91,11 @@ func buildInput(nr *adapter.NativeRequest) []any {
 	}
 	if len(sys) > 0 {
 		items = append(items, textMessageItem("system", strings.Join(sys, "\n\n")))
+	}
+	// 工具传输协议：有客户端工具时注入目录+提醒；无工具时注入禁用 office 工具指令。
+	items = append(items, textMessageItem("developer", clientToolInstructions(nr.Tools)))
+	if r := clientToolReminder(nr.Tools); r != "" {
+		items = append(items, textMessageItem("developer", r))
 	}
 	for _, m := range nr.Messages {
 		switch {
@@ -99,6 +112,9 @@ func buildInput(nr *adapter.NativeRequest) []any {
 }
 
 // messageInputItems 把一条内核消息转成 1~N 个 input item。
+// assistant 历史里的 function_call 需按 run_officejs envelope 重放（模型视角
+// 里它调的是 run_officejs），update_plan 例外——它是上游原生工具，参数恢复成
+// 原生 schema。
 func messageInputItems(m adapter.ChatMessage) []any {
 	switch {
 	case isAssistantRole(m.Role):
@@ -115,10 +131,16 @@ func messageInputItems(m adapter.ChatMessage) []any {
 		if id == "" {
 			id = "call_" + newID()
 		}
+		output := m.Content
+		if strings.TrimSpace(output) == "" {
+			// 空输出在上游读作失败，会诱发重试；显式标记成功。
+			output = "(tool call succeeded with no output)"
+		}
 		return []any{map[string]any{
 			"type":    "function_call_output",
+			"id":      functionItemID(id),
 			"call_id": id,
-			"output":  m.Content,
+			"output":  output,
 		}}
 	default: // user / function
 		return []any{userMessageItem(m)}
@@ -194,6 +216,9 @@ func textMessageItem(role, text string) map[string]any {
 }
 
 // functionCallItem 构造历史里的 function_call item。
+// 客户端工具调用在模型视角是 run_officejs 传输调用（见 toolrelay.go），
+// 历史回放必须还原成那个形态，否则上游看到的 call/结果对不上；
+// update_plan 是上游原生工具，参数恢复成原生 schema。
 func functionCallItem(tc adapter.ToolCall) map[string]any {
 	id := strings.TrimSpace(tc.ID)
 	if id == "" {
@@ -203,34 +228,19 @@ func functionCallItem(tc adapter.ToolCall) map[string]any {
 	if args == "" {
 		args = "{}"
 	}
-	return map[string]any{
-		"type":      "function_call",
-		"call_id":   id,
-		"name":      tc.Name,
-		"arguments": args,
-	}
-}
-
-// buildTools 把内核工具定义转成 Responses function tools。
-func buildTools(tools []adapter.ToolDef) []any {
-	out := make([]any, 0, len(tools))
-	for _, t := range tools {
-		name := strings.TrimSpace(t.Name)
-		if name == "" {
-			continue
+	if tc.Name == "update_plan" {
+		return map[string]any{
+			"type":      "function_call",
+			"id":        functionItemID(id),
+			"call_id":   id,
+			"name":      "update_plan",
+			"arguments": restoreNativeUpdatePlanArgs(args),
 		}
-		params := json.RawMessage(t.Parameters)
-		if len(params) == 0 || !json.Valid(params) {
-			params = json.RawMessage(`{"type":"object","properties":{}}`)
-		}
-		out = append(out, map[string]any{
-			"type":        "function",
-			"name":        name,
-			"description": t.Description,
-			"parameters":  params,
-		})
 	}
-	return out
+	return fallbackTransportCall(map[string]any{
+		"type": "function_call", "call_id": id,
+		"name": tc.Name, "arguments": args,
+	})
 }
 
 // encodeBase64 标准 base64（data URL 用）。

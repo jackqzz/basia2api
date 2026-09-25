@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"strings"
 
 	"bps-2api/internal/adapter"
 )
@@ -41,7 +42,8 @@ func toAdapterRequest(ctx context.Context, req *ChatCompletionRequest, systemPro
 	}
 	for _, t := range req.Tools {
 		out.Tools = append(out.Tools, adapter.ToolDef{
-			Name: t.Function.Name, Description: t.Function.Description, Parameters: t.Function.Parameters,
+			Name: t.Function.Name, Description: t.Function.Description,
+			Parameters: t.Function.Parameters, Custom: strings.EqualFold(t.Type, "custom"),
 		})
 	}
 	return out

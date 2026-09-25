@@ -29,6 +29,7 @@ type ResponsesRequest struct {
 	Instructions    string          `json:"instructions,omitempty"`
 	Input           json.RawMessage `json:"input,omitempty"`
 	Tools           []responsesTool `json:"tools,omitempty"`
+	ToolChoice      any             `json:"tool_choice,omitempty"`
 	Stream          bool            `json:"stream,omitempty"`
 	MaxOutputTokens int             `json:"max_output_tokens,omitempty"`
 	PromptCacheKey  string          `json:"prompt_cache_key,omitempty"`
@@ -58,16 +59,53 @@ type responsesTool struct {
 // 注意 output 必须是 any：function_call_output 的 output 官方允许字符串或
 // content-part 数组（如 [{"type":"input_text","text":"..."}]），string 类型会在
 // 这里直接 400。tool 结果回灌时用数组形态是 SDK（如 Codex）常见写法。
+// Tools 承载 type=additional_tools 条目里的命名空间工具组（Codex 新版把
+// 工具声明放在 input 里而不是顶层 tools 字段）。
 type responsesInputItem struct {
-	Role       string `json:"role"`
-	Type       string `json:"type"` // message | function_call | function_call_output | custom_tool_call | custom_tool_call_output | reasoning
-	Content    any    `json:"content,omitempty"`
-	Name       string `json:"name,omitempty"`
-	CallID     string `json:"call_id,omitempty"`
-	Output     any    `json:"output,omitempty"`
-	Arguments  any    `json:"arguments,omitempty"`
-	Input      any    `json:"input,omitempty"`
-	ToolCallID string `json:"tool_call_id,omitempty"`
+	Role       string                 `json:"role"`
+	Type       string                 `json:"type"` // message | function_call | function_call_output | custom_tool_call | custom_tool_call_output | additional_tools | reasoning
+	Content    any                    `json:"content,omitempty"`
+	Name       string                 `json:"name,omitempty"`
+	CallID     string                 `json:"call_id,omitempty"`
+	Output     any                    `json:"output,omitempty"`
+	Arguments  any                    `json:"arguments,omitempty"`
+	Input      any                    `json:"input,omitempty"`
+	ToolCallID string                 `json:"tool_call_id,omitempty"`
+	Tools      []responsesNamespaceTool `json:"tools,omitempty"`
+}
+
+// responsesNamespaceTool 是 additional_tools 里的条目：命名空间组
+// （type=namespace + 嵌套 tools）或叶子工具（function/custom）。
+type responsesNamespaceTool struct {
+	Type        string                   `json:"type"`
+	Name        string                   `json:"name,omitempty"`
+	Description string                   `json:"description,omitempty"`
+	Parameters  json.RawMessage          `json:"parameters,omitempty"`
+	Format      json.RawMessage          `json:"format,omitempty"`
+	Tools       []responsesNamespaceTool `json:"tools,omitempty"`
+}
+
+// iterNamespaceLeafTools 摊平 additional_tools 命名空间组。
+// 回程给 Codex 的工具名用裸叶子名（实测 Codex 把 "functions.exec" 判为
+// unsupported custom tool call——它注册的是叶子名，命名空间只是分组展示）。
+// 叶子名冲突时后者覆盖前者（罕见，Codex 自己的 functions/collaboration 不撞名）。
+func iterNamespaceLeafTools(groups []responsesNamespaceTool, namespace string, yield func(key string, leaf responsesNamespaceTool)) {
+	for _, g := range groups {
+		name := strings.TrimSpace(g.Name)
+		leafType := strings.ToLower(strings.TrimSpace(g.Type))
+		if leafType == "namespace" || (len(g.Tools) > 0 && leafType != "function" && leafType != "custom") {
+			ns := name
+			if ns == "" {
+				ns = namespace
+			}
+			iterNamespaceLeafTools(g.Tools, ns, yield)
+			continue
+		}
+		if name == "" {
+			continue
+		}
+		yield(name, g)
+	}
 }
 
 // responsesToChatRequest 将 Responses 请求转为内部 ChatCompletionRequest。
@@ -140,6 +178,27 @@ func responsesToChatRequest(req *ResponsesRequest) (*ChatCompletionRequest, erro
 		return nil, fmt.Errorf("invalid input: %w", err)
 	}
 	for _, item := range items {
+		if item.Type == "additional_tools" {
+			// Codex 新版：工具声明在 input 的 additional_tools 里（命名空间嵌套），
+			// 顶层 tools 字段可能根本不存在。摊平成 "namespace.name" 工具定义。
+			iterNamespaceLeafTools(item.Tools, "", func(key string, leaf responsesNamespaceTool) {
+				params := leaf.Parameters
+				toolType := "function"
+				if strings.EqualFold(leaf.Type, "custom") {
+					toolType = "custom"
+					params = json.RawMessage(`{"type":"object","properties":{"input":{"type":"string","description":"freeform tool input"}},"required":["input"]}`)
+				} else if len(params) > 0 {
+					params = normalizeJSONSchema(params)
+				} else {
+					params = json.RawMessage(`{"type":"object"}`)
+				}
+				out.Tools = append(out.Tools, Tool{
+					Type:     toolType,
+					Function: ToolFunction{Name: key, Description: leaf.Description, Parameters: params},
+				})
+			})
+			continue
+		}
 		switch item.Type {
 		case "function_call_output", "custom_tool_call_output":
 			// Codex 回程的 custom_tool_call_output 与 function_call_output 同义：
@@ -197,6 +256,11 @@ func responsesToChatRequest(req *ResponsesRequest) (*ChatCompletionRequest, erro
 	}
 
 	out.Messages = msgs
+	// tool_choice:"none" 时客户端明确不要工具：清空目录，
+	// 下游按无工具处理（提示词改为「不要调用任何工具」）。
+	if s, ok := req.ToolChoice.(string); ok && strings.EqualFold(strings.TrimSpace(s), "none") {
+		out.Tools = nil
+	}
 	return out, nil
 }
 
@@ -335,12 +399,10 @@ type responseObject struct {
 // customToolNames 收集本请求里声明为 freeform（type:"custom"）的工具名。
 // 客户端（Codex CLI）把 apply_patch 这类工具发成 custom；上游没有 tools 通道，
 // 我们用提示词仿真并按 function 描述，回程必须还原成 custom_tool_call 它才认。
-func customToolNames(tools []responsesTool) map[string]bool {
-	if len(tools) == 0 {
-		return nil
-	}
+// 同时扫 input 里 additional_tools 的 custom 叶子（Codex 新版的命名空间声明）。
+func customToolNames(req *ResponsesRequest) map[string]bool {
 	out := make(map[string]bool, 2)
-	for _, t := range tools {
+	for _, t := range req.Tools {
 		if strings.EqualFold(t.Type, "custom") {
 			// 顶层 name 为空时回退到嵌套 function.name：客户端可能按
 			// {"type":"custom","function":{"name":"apply_patch"}} 声明，
@@ -352,6 +414,23 @@ func customToolNames(tools []responsesTool) map[string]bool {
 			if n != "" {
 				out[n] = true
 			}
+		}
+	}
+	var items []responsesInputItem
+	raw := bytes.TrimSpace(req.Input)
+	if len(raw) > 0 && raw[0] == '{' {
+		raw = append([]byte{'['}, append(raw, ']')...)
+	}
+	if len(raw) > 0 && raw[0] == '[' && json.Unmarshal(raw, &items) == nil {
+		for _, item := range items {
+			if item.Type != "additional_tools" {
+				continue
+			}
+			iterNamespaceLeafTools(item.Tools, "", func(key string, leaf responsesNamespaceTool) {
+				if strings.EqualFold(leaf.Type, "custom") {
+					out[key] = true
+				}
+			})
 		}
 	}
 	if len(out) == 0 {
@@ -502,7 +581,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	custom := customToolNames(req.Tools)
+	custom := customToolNames(&req)
 	if req.Stream {
 		s.streamResponses(w, r, chatReq, custom)
 		return

@@ -13,16 +13,26 @@ func TestMapChatGeneratesTaskTurn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mapChat: %v", err)
 	}
-	if extraString(nr, "task_id") == "" || extraString(nr, "turn_id") == "" {
-		t.Fatalf("task/turn missing: %+v", nr.Extra)
-	}
 	body := buildRequestBody(nr)
 	meta, _ := body["metadata"].(map[string]any)
-	if meta["task_id"] == "" || meta["turn_id"] == "" {
-		t.Fatalf("metadata task/turn missing: %+v", meta)
+	if meta["task_id"] == "" || meta["turn_id"] == "" || meta["agent_iteration"] == "" {
+		t.Fatalf("metadata task/turn/iter missing: %+v", meta)
 	}
 	if body["stream"] != true || body["store"] != false {
 		t.Fatalf("stream/store wrong: %+v", body)
+	}
+	if body["model_selection"] != "explicit" {
+		t.Fatalf("model_selection: %+v", body["model_selection"])
+	}
+	// 同一输入派生同一 task_id（确定性）；Extra 显式值优先
+	body2 := buildRequestBody(nr)
+	if body2["metadata"].(map[string]any)["task_id"] != meta["task_id"] {
+		t.Fatal("task_id not deterministic")
+	}
+	nr2 := &adapter.NativeRequest{Messages: nr.Messages, Extra: map[string]any{"task_id": "t1", "turn_id": "u1"}}
+	meta2 := buildRequestBody(nr2)["metadata"].(map[string]any)
+	if meta2["task_id"] != "t1" || meta2["turn_id"] != "u1" {
+		t.Fatalf("extra override lost: %+v", meta2)
 	}
 }
 
@@ -67,9 +77,13 @@ func TestBuildRequestBodyEffortAndTools(t *testing.T) {
 	if reasoning["effort"] != "xhigh" {
 		t.Fatalf("max should map to xhigh: %+v", reasoning)
 	}
-	tools, _ := body["tools"].([]any)
-	if len(tools) != 1 {
-		t.Fatalf("tools not forwarded: %+v", body["tools"])
+	// 客户端 tools 不进上游（白名单 422），改走 run_officejs 提示词目录
+	if _, present := body["tools"]; present {
+		t.Fatalf("client tools must not be forwarded: %+v", body["tools"])
+	}
+	raw, _ := json.Marshal(body["input"])
+	if !strings.Contains(string(raw), "Read") || !strings.Contains(string(raw), "run_officejs") {
+		t.Fatalf("tool catalog not injected into prompt: %s", raw)
 	}
 }
 

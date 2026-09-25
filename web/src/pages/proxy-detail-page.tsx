@@ -33,8 +33,9 @@ export function ProxyDetailPage() {
               variant="secondary"
               onClick={async () => {
                 const t = await adminApi.probeProxy(id);
-                toast.success("探测任务已排队");
-                nav(`/tasks/${t.task.id}`);
+                toast.success("探测任务已排队", {
+                  action: { label: "查看任务", onClick: () => nav(`/tasks/${t.task.id}`) },
+                });
               }}
             >
               探测出口 IP

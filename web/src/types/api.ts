@@ -301,3 +301,34 @@ export type EmulationState = {
   cache_log?: CacheLog[];
   search_log?: SearchLog[];
 };
+
+export type PoolAccount = {
+  name: string;
+  email?: string;
+  account_id?: string;
+  plan?: string;
+  has_refresh: boolean;
+  ready: boolean;
+  failures: number;
+  expires_at: number;
+  inflight: number;
+  enabled: boolean;
+};
+
+export type MeterStats = {
+  rpm: number;
+  tpm: number;
+  served_rpm: number;
+  rejected_rpm: number;
+  retry_per_req: number;
+  prompt_tpm: number;
+  completion_tpm: number;
+};
+
+export type MetricsSnapshot = {
+  window_sec: number;
+  inflight: number;
+  global: MeterStats;
+  by_model: Record<string, MeterStats>;
+  rpm_trend: number[];
+};

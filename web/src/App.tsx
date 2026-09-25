@@ -18,6 +18,8 @@ const AccountDetailPage = lazy(() => import("@/pages/account-detail-page").then(
 const KeysPage = lazy(() => import("@/pages/keys-page").then((m) => ({ default: m.KeysPage })));
 const KeyDetailPage = lazy(() => import("@/pages/key-detail-page").then((m) => ({ default: m.KeyDetailPage })));
 const GroupsPage = lazy(() => import("@/pages/groups-page").then((m) => ({ default: m.GroupsPage })));
+const PoolPage = lazy(() => import("@/pages/pool-page").then((m) => ({ default: m.PoolPage })));
+const MetricsPage = lazy(() => import("@/pages/metrics-page").then((m) => ({ default: m.MetricsPage })));
 const GroupDetailPage = lazy(() => import("@/pages/group-detail-page").then((m) => ({ default: m.GroupDetailPage })));
 const LogsPage = lazy(() => import("@/pages/logs-page").then((m) => ({ default: m.LogsPage })));
 const LogDetailPage = lazy(() => import("@/pages/log-detail-page").then((m) => ({ default: m.LogDetailPage })));
@@ -96,6 +98,11 @@ const router = createBrowserRouter(
               ],
             },
             {
+              path: "/pool",
+              element: page(<PoolPage />),
+              handle: { crumbs: [{ label: "资源" }, { label: "账号池", to: "/pool" }] },
+            },
+            {
               path: "/groups",
               handle: { crumbs: [{ label: "资源" }, { label: "分组", to: "/groups" }] },
               children: [
@@ -130,6 +137,11 @@ const router = createBrowserRouter(
                   handle: { crumb: (p: { id?: string }) => ({ label: p.id || "详情" }) },
                 },
               ],
+            },
+            {
+              path: "/metrics",
+              element: page(<MetricsPage />),
+              handle: { crumbs: [{ label: "可观测" }, { label: "实时容量", to: "/metrics" }] },
             },
             {
               path: "/usage",

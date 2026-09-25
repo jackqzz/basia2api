@@ -34,7 +34,11 @@ async function submitImport(raw: string, overwrite: boolean) {
     if (parsed.text && !parsed.accounts?.length) {
       return adminApi.importAccounts({ text: parsed.text, overwrite });
     }
-    return adminApi.importAccounts({ accounts: parsed.accounts ?? [], text: parsed.text, overwrite });
+    if (parsed.accounts?.length) {
+      return adminApi.importAccounts({ accounts: parsed.accounts, text: parsed.text, overwrite });
+    }
+    // 单个账号对象（cpa/codex 凭证文件、auth.json）：包成数组交给后端解析。
+    return adminApi.importAccounts({ accounts: [parsed], overwrite });
   }
   return adminApi.importAccounts({ text, overwrite });
 }
@@ -61,6 +65,7 @@ export function AccountsPage() {
   const [email, setEmail] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [accessToken, setAccessToken] = useState("");
+  const [refreshToken, setRefreshToken] = useState("");
   const [importText, setImportText] = useState("");
   const [picked, setPicked] = useState<string[]>([]);
   const [loginUrl, setLoginUrl] = useState("");
@@ -89,6 +94,7 @@ export function AccountsPage() {
         email: email || undefined,
         api_key: apiKey || undefined,
         access_token: accessToken || undefined,
+        refresh_token: refreshToken || undefined,
       }),
     onSuccess: (res) => {
       void qc.invalidateQueries({ queryKey: ["accounts"] });
@@ -108,10 +114,11 @@ export function AccountsPage() {
     mutationFn: ({ action, extra }: { action: string; extra?: Record<string, unknown> }) =>
       adminApi.accountActions(action, picked, extra),
     onSuccess: (res) => {
-      toast.success("已提交任务");
+      toast.success("已提交任务", {
+        action: { label: "查看任务", onClick: () => nav(`/tasks/${res.task.id}`) },
+      });
       setPicked([]);
       void qc.invalidateQueries({ queryKey: ["tasks"] });
-      nav(`/tasks/${res.task.id}`);
     },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -168,8 +175,9 @@ export function AccountsPage() {
                 if (!file) return;
                 try {
                   const res = await submitImport(await file.text(), overwrite);
-                  toast.success("导入任务已排队");
-                  nav(`/tasks/${res.task.id}`);
+                  toast.success("导入任务已排队", {
+                    action: { label: "查看任务", onClick: () => nav(`/tasks/${res.task.id}`) },
+                  });
                 } catch (err) {
                   toast.error(err instanceof Error ? err.message : "导入失败");
                 }
@@ -309,7 +317,7 @@ export function AccountsPage() {
         <DialogContent className="w-[min(720px,calc(100vw-24px))]">
           <DialogTitle>导入账号</DialogTitle>
           <DialogDesc>
-            支持逐行 `email----password----token`、JSON 数组，或选择文件。站点特有字段由适配器 `ExchangeCredential` 消化。
+            支持逐行 `email----password----token`、JSON 数组、单个凭证对象（cpa/codex 凭证 JSON、auth.json），或选择文件。
           </DialogDesc>
           <div className="mt-4 space-y-3">
             <Textarea
@@ -327,10 +335,11 @@ export function AccountsPage() {
                 onClick={async () => {
                   try {
                     const res = await submitImport(importText, overwrite);
-                    toast.success("导入任务已排队");
+                    toast.success("导入任务已排队", {
+                      action: { label: "查看任务", onClick: () => nav(`/tasks/${res.task.id}`) },
+                    });
                     setImportOpen(false);
                     setImportText("");
-                    nav(`/tasks/${res.task.id}`);
                   } catch (err) {
                     toast.error(err instanceof Error ? err.message : "导入失败");
                   }
@@ -346,23 +355,34 @@ export function AccountsPage() {
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent>
           <DialogTitle>添加账号</DialogTitle>
-          <DialogDesc>填 Access Token 或 API Key 立刻入池；都留空则打开浏览器授权（需适配器实现 LoginURL）。</DialogDesc>
+          <DialogDesc>
+            Access Token 必填（ChatGPT JWT）；可整段粘贴 auth.json，会自动提取 at/rt。只给 access token 没带 rt 的账号，到期即死。
+          </DialogDesc>
           <div className="mt-4 space-y-3">
             <div className="space-y-1.5">
-              <Label>名称</Label>
-              <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="可空，默认用邮箱前缀" />
+              <Label>名称（可空，默认取邮箱前缀）</Label>
+              <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="biz" />
             </div>
             <div className="space-y-1.5">
               <Label>邮箱（可空）</Label>
               <Input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@example.com" />
             </div>
             <div className="space-y-1.5">
-              <Label>Session / Access Token（可空）</Label>
+              <Label>Access Token *</Label>
               <Textarea
                 className="min-h-20 font-mono text-[12px]"
                 value={accessToken}
                 onChange={(e) => setAccessToken(e.target.value)}
-                placeholder="access token / session token"
+                placeholder="eyJhbGciOi...（或整段 auth.json / Cookie）"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Refresh Token（可空，建议带，到期自动续期）</Label>
+              <Input
+                className="font-mono text-[12px]"
+                value={refreshToken}
+                onChange={(e) => setRefreshToken(e.target.value)}
+                placeholder="rt.xxx"
               />
             </div>
             <div className="space-y-1.5">
@@ -375,7 +395,13 @@ export function AccountsPage() {
               </a>
             ) : null}
             {loginName ? <p className="font-mono text-[12px] text-ash">正在等待 {loginName} 完成授权…</p> : null}
-            <Button onClick={() => create.mutate()} disabled={create.isPending}>
+            {!accessToken.trim() && !refreshToken.trim() ? (
+              <p className="text-[12px] text-crimson">Access Token 或 Refresh Token 至少填一个</p>
+            ) : null}
+            <Button
+              onClick={() => create.mutate()}
+              disabled={create.isPending || (!accessToken.trim() && !refreshToken.trim())}
+            >
               {create.isPending ? "提交中…" : "创建"}
             </Button>
           </div>

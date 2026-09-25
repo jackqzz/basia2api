@@ -1,6 +1,7 @@
 package bps
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -29,7 +30,7 @@ func TestConsumeSSEEvents(t *testing.T) {
 	err := consumeSSE(strings.NewReader(sampleSSE), func(ev adapter.Event) bool {
 		events = append(events, ev)
 		return true
-	})
+	}, []adapter.ToolDef{{Name: "Read", Parameters: json.RawMessage(`{"type":"object"}`)}})
 	if err != nil {
 		t.Fatalf("consumeSSE: %v", err)
 	}
@@ -64,7 +65,7 @@ func TestConsumeSSEFailedEvent(t *testing.T) {
 data: {"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"boom"}}}
 
 `
-	err := consumeSSE(strings.NewReader(sse), func(adapter.Event) bool { return true })
+	err := consumeSSE(strings.NewReader(sse), func(adapter.Event) bool { return true }, nil)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -75,7 +76,7 @@ data: {"type":"response.failed","response":{"status":"failed","error":{"code":"s
 }
 
 func TestConsumeSSEClientGone(t *testing.T) {
-	err := consumeSSE(strings.NewReader(sampleSSE), func(adapter.Event) bool { return false })
+	err := consumeSSE(strings.NewReader(sampleSSE), func(adapter.Event) bool { return false }, nil)
 	if err != errClientGone {
 		t.Fatalf("want errClientGone, got %v", err)
 	}
@@ -87,7 +88,7 @@ func TestConsumeSSEIgnoresBadFrames(t *testing.T) {
 	if err := consumeSSE(strings.NewReader(sse), func(ev adapter.Event) bool {
 		text += ev.Text
 		return true
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatalf("consumeSSE: %v", err)
 	}
 	if text != "ok" {

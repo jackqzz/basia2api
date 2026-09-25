@@ -124,7 +124,9 @@ func ParseImportLine(line string) (AccountImport, error) {
 	return in, nil
 }
 
-// pickRefreshToken 从一段文本里提取 ChatGPT refresh token（rt.xxx 或 refresh_token=rt.xxx）。
+// pickRefreshToken 从一段文本里提取 ChatGPT refresh token。
+// 认法：行首 rt.xxx、refresh_token=rt.xxx、JSON "refresh_token":"rt.xxx"，以及
+// 整段 auth.json/Cookie 里裸扫 rt.*。
 func pickRefreshToken(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if strings.HasPrefix(raw, "rt.") {
@@ -133,12 +135,27 @@ func pickRefreshToken(raw string) string {
 		}
 		return raw
 	}
-	if i := strings.Index(raw, "refresh_token="); i >= 0 {
-		v := raw[i+len("refresh_token="):]
-		if j := strings.IndexAny(v, ";\"\n\r\t ,}"); j >= 0 {
+	for _, key := range []string{"refresh_token=", `"refresh_token":"`, `"refresh_token": "`} {
+		if i := strings.Index(raw, key); i >= 0 {
+			v := raw[i+len(key):]
+			if j := strings.IndexAny(v, ";\"\n\r\t ,}"); j >= 0 {
+				v = v[:j]
+			}
+			if v = strings.TrimSpace(v); strings.HasPrefix(v, "rt.") {
+				return v
+			}
+		}
+	}
+	// 裸扫 rt.*：auth.json 里的键名可能带空格/大小写差异，直接按 token 形态找。
+	if i := strings.Index(raw, "rt."); i >= 0 {
+		v := raw[i:]
+		j := strings.IndexFunc(v, func(r rune) bool {
+			return !(r == '.' || r == '-' || r == '_' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z')
+		})
+		if j >= 0 {
 			v = v[:j]
 		}
-		if v = strings.TrimSpace(v); strings.HasPrefix(v, "rt.") {
+		if len(v) > 3 {
 			return v
 		}
 	}

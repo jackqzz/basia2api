@@ -108,7 +108,7 @@ func TestResponsesCustomToolDescribedAsSingleInput(t *testing.T) {
 	if !strings.Contains(string(fn.Function.Parameters), `"command"`) {
 		t.Fatalf("function 工具的参数被改坏了: %s", fn.Function.Parameters)
 	}
-	if got := customToolNames(req.Tools); !got["apply_patch"] || got["shell"] {
+	if got := customToolNames(req); !got["apply_patch"] || got["shell"] {
 		t.Fatalf("customToolNames = %v，只应含 apply_patch", got)
 	}
 }
@@ -377,7 +377,7 @@ func TestResponsesCustomToolNamesNestedFunction(t *testing.T) {
 			Parameters  json.RawMessage `json:"parameters,omitempty"`
 		}{Name: "apply_patch"}},
 	}
-	if got := customToolNames(tools); !got["apply_patch"] {
+	if got := customToolNames(&ResponsesRequest{Tools: tools}); !got["apply_patch"] {
 		t.Fatalf("嵌套 function 形态的名字应被收集，得到 %v", got)
 	}
 }

@@ -60,6 +60,8 @@ type FilePart struct {
 }
 
 // Tool 是 OpenAI function 工具定义。
+// Type="custom" 表示 freeform 工具（Responses additional_tools/custom 摊平而来），
+// Parameters 约定为 {"input": string}；回程要还原成 custom_tool_call。
 type Tool struct {
 	Type     string       `json:"type"`
 	Function ToolFunction `json:"function"`

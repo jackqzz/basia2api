@@ -284,6 +284,7 @@ func (s *Server) handleAdminAccounts(w http.ResponseWriter, r *http.Request) {
 			APIKey       string `json:"api_key"`
 			AccessToken  string `json:"access_token"`
 			SessionToken string `json:"session_token"`
+			RefreshToken string `json:"refresh_token"`
 		}
 		if err := json.NewDecoder(ioLimit(r.Body)).Decode(&body); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"message": "invalid body: " + err.Error()}})
@@ -296,7 +297,7 @@ func (s *Server) handleAdminAccounts(w http.ResponseWriter, r *http.Request) {
 		if name == "" {
 			name = "default"
 		}
-		if body.APIKey != "" || body.AccessToken != "" || body.SessionToken != "" {
+		if body.APIKey != "" || body.AccessToken != "" || body.SessionToken != "" || body.RefreshToken != "" {
 			h := &adminapi.Handler{Pool: s.pool, AfterAccountChange: s.pool.RefreshAccountEgress}
 			if _, _, err := h.ImportOne(adminapi.AccountImport{
 				Name:         name,
@@ -304,6 +305,7 @@ func (s *Server) handleAdminAccounts(w http.ResponseWriter, r *http.Request) {
 				APIKey:       body.APIKey,
 				AccessToken:  body.AccessToken,
 				SessionToken: body.SessionToken,
+				RefreshToken: body.RefreshToken,
 			}, true); err != nil {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"message": err.Error()}})
 				return

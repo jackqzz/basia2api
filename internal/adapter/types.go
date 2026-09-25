@@ -49,10 +49,13 @@ type File struct {
 }
 
 // ToolDef is an OpenAI function tool.
+// Custom 标记 freeform/custom 工具（Codex apply_patch、exec 之类）：Parameters
+// 按约定是 {"input": string} 单参数形状，回程还原成 custom_tool_call。
 type ToolDef struct {
 	Name        string
 	Description string
 	Parameters  json.RawMessage
+	Custom      bool
 }
 
 // ToolCall is a completed tool invocation.

@@ -151,6 +151,13 @@ func (a *AccountImport) UnmarshalJSON(data []byte) error {
 	if a.SessionToken == "" {
 		a.SessionToken = pick("WorkosCursorSessionToken", "sessionToken", "session", "SessionToken")
 	}
+	// cpa/codex 凭证文件带 "disabled" 标记时，导入即停用。
+	if a.Enabled == nil {
+		if v, ok := extra["disabled"].(bool); ok && v {
+			en := false
+			a.Enabled = &en
+		}
+	}
 	return nil
 }
 

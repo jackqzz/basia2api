@@ -36,7 +36,7 @@ const groups: { title: string; items: NavItem[] }[] = [
     title: "资源",
     items: [
       { to: "/accounts", label: "账号", icon: Users },
-      { to: "/api/admin/pool/view", label: "账号池", icon: FolderKey, external: true },
+      { to: "/pool", label: "账号池", icon: FolderKey },
       { to: "/keys", label: "入口密钥", icon: KeyRound },
       { to: "/groups", label: "分组", icon: Layers3 },
     ],
@@ -44,7 +44,7 @@ const groups: { title: string; items: NavItem[] }[] = [
   {
     title: "可观测",
     items: [
-      { to: "/api/admin/metrics/view", label: "实时容量", icon: Gauge, external: true },
+      { to: "/metrics", label: "实时容量", icon: Gauge },
       { to: "/logs", label: "请求日志", icon: ScrollText },
       { to: "/tasks", label: "任务中心", icon: Workflow },
       { to: "/usage", label: "用量", icon: Activity },

@@ -376,6 +376,10 @@ func (h *Handler) ImportOne(in AccountImport, overwrite bool) (imported, skipped
 	if access == "" {
 		access, _ = pickTokens(in.SessionToken)
 	}
+	// 粘贴整段 auth.json / Cookie 时顺手把 rt.* 挑出来：没带 refresh 的 access 到期就死。
+	if strings.TrimSpace(in.RefreshToken) == "" {
+		in.RefreshToken = pickRefreshToken(in.AccessToken)
+	}
 	if access != "" {
 		if exp := auth.JWTExpiry(access); exp > 0 && exp < time.Now().Unix() {
 			return false, false, fmt.Errorf("access token expired")

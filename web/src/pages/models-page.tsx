@@ -132,8 +132,9 @@ export function ModelsPage() {
             <Button
               onClick={async () => {
                 const t = await adminApi.modelsRefreshTask();
-                toast.success("已排队");
-                nav(`/tasks/${t.task.id}`);
+                toast.success("已排队", {
+                  action: { label: "查看任务", onClick: () => nav(`/tasks/${t.task.id}`) },
+                });
               }}
             >
               刷新上游

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"strings"
 
 	"bps-2api/internal/adapter"
@@ -65,7 +66,9 @@ type outputItem struct {
 }
 
 // consumeSSE 解析上游 SSE 流并映射成事件；emit 返回 false 表示客户端已断开。
-func consumeSSE(r io.Reader, emit func(adapter.Event) bool) error {
+// tools 是本请求声明的客户端工具集：run_officejs 传输调用在这里被还原成
+// 客户端工具调用（call_id 直通），未声明的原生调用（office 工具）不下发。
+func consumeSSE(r io.Reader, emit func(adapter.Event) bool, tools []adapter.ToolDef) error {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64<<10), 8<<20)
 	var (
@@ -80,7 +83,7 @@ func consumeSSE(r io.Reader, emit func(adapter.Event) bool) error {
 		if payload == "" || payload == "[DONE]" {
 			return nil
 		}
-		return handleFrame(eventName, payload, emit)
+		return handleFrame(eventName, payload, emit, tools)
 	}
 	for sc.Scan() {
 		line := strings.TrimRight(sc.Text(), "\r")
@@ -110,7 +113,7 @@ func consumeSSE(r io.Reader, emit func(adapter.Event) bool) error {
 }
 
 // handleFrame 处理一个 SSE 帧；返回错误表示流内失败（交由内核换号）。
-func handleFrame(eventName, payload string, emit func(adapter.Event) bool) error {
+func handleFrame(eventName, payload string, emit func(adapter.Event) bool, tools []adapter.ToolDef) error {
 	var f sseFrame
 	if err := json.Unmarshal([]byte(payload), &f); err != nil {
 		// 坏帧不致命：忽略继续读流。
@@ -131,16 +134,16 @@ func handleFrame(eventName, payload string, emit func(adapter.Event) bool) error
 		}
 	case "response.output_item.done":
 		var item outputItem
-		if json.Unmarshal(f.Item, &item) == nil && item.Type == "function_call" {
-			if !emit(adapter.Event{ToolCall: &adapter.StreamedToolCall{
-				Tool:       "function",
-				ToolCallID: item.CallID,
-				Name:       item.Name,
-				RawArgs:    item.Arguments,
-				Kind:       "function",
-			}}) {
-				return errClientGone
-			}
+		if json.Unmarshal(f.Item, &item) != nil || item.Type != "function_call" {
+			break
+		}
+		call := mapNativeToolCall(item, tools)
+		if call == nil {
+			log.Printf("bps: dropped native function_call name=%q (not a declared client tool)", item.Name)
+			break
+		}
+		if !emit(adapter.Event{ToolCall: call}) {
+			return errClientGone
 		}
 	case "response.completed":
 		var obj responseObject
@@ -177,3 +180,102 @@ func handleFrame(eventName, payload string, emit func(adapter.Event) bool) error
 
 // errClientGone 是 emit 返回 false 时的哨兵错误（客户端断开，内核不换号）。
 var errClientGone = fmt.Errorf("bps: client disconnected")
+
+// mapNativeToolCall 把上游 function_call 还原成客户端工具调用。
+//   - run_officejs → 解 code envelope，取内层 name/arguments（call_id 直通）
+//   - 原生 update_plan → 参数归一到客户端 schema
+//   - 直呼客户端工具名 → 校验 schema 后放行
+//   - 其它（office 原生工具/畸形 envelope/未声明名）→ 返回 nil 不下发
+func mapNativeToolCall(item outputItem, tools []adapter.ToolDef) *adapter.StreamedToolCall {
+	if len(tools) == 0 {
+		log.Printf("bps: drop %q: no client tools declared", item.Name)
+		return nil
+	}
+	specs := make(map[string]json.RawMessage, len(tools))
+	customSet := make(map[string]bool, len(tools))
+	for _, t := range tools {
+		if n := strings.TrimSpace(t.Name); n != "" {
+			specs[n] = t.Parameters
+			customSet[n] = t.Custom
+		}
+	}
+
+	name, rawArgs := item.Name, item.Arguments
+	if isTransportName(name) {
+		env := transportEnvelope(name, rawArgs)
+		if env == nil {
+			log.Printf("bps: drop run_officejs: malformed envelope")
+			return nil
+		}
+		inner, _ := env["name"].(string)
+		if inner == "" {
+			log.Printf("bps: drop run_officejs: envelope missing inner name")
+			return nil
+		}
+		name = inner
+		switch a := env["arguments"].(type) {
+		case string:
+			rawArgs = a
+		case map[string]any:
+			if b, err := json.Marshal(a); err == nil {
+				rawArgs = string(b)
+			}
+		default:
+			// custom 形状 {"name":..., "input":...}: 包回 {input:...} 参数形态
+			if in, ok := env["input"].(string); ok {
+				if b, err := json.Marshal(map[string]any{"input": in}); err == nil {
+					rawArgs = string(b)
+				}
+			}
+		}
+	}
+	if _, ok := specs[name]; !ok {
+		// 命名空间兜底：模型可能丢前缀（catalog 里是 functions.exec，
+		// 模型只写 exec）。裸名唯一命中一个声明工具时用它。
+		matched := ""
+		for k := range specs {
+			if strings.HasSuffix(k, "."+name) {
+				if matched != "" {
+					matched = "" // 歧义：多个命名空间同名，放弃
+					break
+				}
+				matched = k
+			}
+		}
+		if matched == "" {
+			log.Printf("bps: drop %q: inner tool not in client catalog", name)
+			return nil
+		}
+		name = matched
+	}
+	var parsed map[string]any
+	if json.Unmarshal([]byte(rawArgs), &parsed) != nil || parsed == nil {
+		log.Printf("bps: drop %q: arguments not a JSON object", name)
+		return nil
+	}
+	if customSet[name] {
+		// freeform 工具：模型可能给 arguments 对象而非 {input}，
+		// 统一包成 {"input":...}——API 层 customInput() 会取 input 或原样透传。
+		if _, has := parsed["input"]; !has {
+			parsed = map[string]any{"input": rawArgs}
+		}
+	}
+	if name == "update_plan" {
+		parsed = normalizeNativeUpdatePlanArgs(parsed)
+	}
+	if !customSet[name] && len(specs[name]) > 0 && json.Valid(specs[name]) {
+		var schema any
+		if json.Unmarshal(specs[name], &schema) == nil && !valueMatchesSchema(parsed, schema) {
+			log.Printf("bps: drop %q: arguments fail declared schema", name)
+			return nil
+		}
+	}
+	outArgs, _ := json.Marshal(parsed)
+	return &adapter.StreamedToolCall{
+		Tool:       "function",
+		ToolCallID: item.CallID,
+		Name:       name,
+		RawArgs:    string(outArgs),
+		Kind:       "function",
+	}
+}
