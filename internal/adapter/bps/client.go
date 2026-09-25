@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -222,9 +223,79 @@ func (c *httpClient) do(ctx context.Context, sec Secret, body []byte) (*http.Res
 	return c.httpClientRef().Do(req)
 }
 
-// ListModels 上游没有模型目录接口，目录走静态表。
+// ListModels 拉上游模型目录（GET /responses/models）：返回该账号实际可用的
+// 模型 + effort 档位；静态表只是拿不到账号时的兜底。
 func (c *httpClient) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
-	return nil, adapter.ErrNotImplemented
+	sec, err := c.credential()
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.origin()+PathResponses+"/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+sec.AccessToken)
+	req.Header.Set("chatgpt-account-id", sec.AccountID)
+	req.Header.Set("x-openai-account-id", sec.AccountID)
+	req.Header.Set("x-basispoints-auth-mode", "chatgpt")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("originator", "codex-tui")
+	req.Header.Set("User-Agent", c.userAgent())
+	resp, err := c.httpClientRef().Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("bps: models: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<10))
+		return nil, fmt.Errorf("bps: models: status %d: %s", resp.StatusCode, truncate(strings.TrimSpace(string(raw)), 200))
+	}
+	var body struct {
+		Models []struct {
+			ID            string `json:"id"`
+			Label         string `json:"label"`
+			DefaultEffort string `json:"default_effort"`
+			Efforts       []struct {
+				Value string `json:"value"`
+			} `json:"efforts"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, fmt.Errorf("bps: models: decode: %w", err)
+	}
+	// 上游响应不带别名表——按 ID 把静态表的别名合进 live 条目，
+	// 否则 codex/sol/default 这类短名会被入口校验判成未知模型。
+	staticAlias := map[string][]string{}
+	for _, sm := range staticModels() {
+		staticAlias[sm.ID] = sm.Aliases
+	}
+	out := make([]adapter.ModelInfo, 0, len(body.Models))
+	for _, m := range body.Models {
+		mi := adapter.ModelInfo{
+			ID:                m.ID,
+			ServerModelName:   m.ID,
+			DisplayName:       firstNonEmpty(m.Label, m.ID),
+			SupportsThinking:  len(m.Efforts) > 1, // 单档 none = 无可调推理
+			SupportsImages:    true,
+			ContextTokenLimit: DefaultContextLimit,
+			ThinkingLevel:     m.DefaultEffort,
+		}
+		for _, e := range m.Efforts {
+			if v := strings.TrimSpace(e.Value); v != "" && !slices.Contains(mi.Efforts, v) {
+				mi.Efforts = append(mi.Efforts, v)
+			}
+		}
+		// 兜底：efforts 列表缺 default_effort 时补上，保证白名单至少含默认档。
+		if def := strings.TrimSpace(m.DefaultEffort); def != "" && !slices.Contains(mi.Efforts, def) {
+			mi.Efforts = append(mi.Efforts, def)
+		}
+		mi.Aliases = staticAlias[mi.ID]
+		out = append(out, mi)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("bps: models: empty catalog")
+	}
+	return out, nil
 }
 
 // whamUsageURL 是 ChatGPT 官方额度接口（与网页端/codex 同一数据源）。
@@ -283,24 +354,45 @@ func (c *httpClient) fillWhamUsage(ctx context.Context, sec Secret, snap *adapte
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<10))
 		return fmt.Errorf("wham/usage: status %d: %s", resp.StatusCode, truncate(strings.TrimSpace(string(raw)), 200))
 	}
-	var w struct {
-		Email     string `json:"email"`
-		UserID    string `json:"user_id"`
-		PlanType  string `json:"plan_type"`
-		RateLimit struct {
-			Allowed          bool        `json:"allowed"`
-			LimitReached     bool        `json:"limit_reached"`
-			PrimaryWindow    *whamWindow `json:"primary_window"`
-			SecondaryWindow  *whamWindow `json:"secondary_window"`
-		} `json:"rate_limit"`
-		Credits struct {
-			HasCredits bool `json:"has_credits"`
-			Unlimited  bool `json:"unlimited"`
-		} `json:"credits"`
-	}
+	var w whamPayload
 	if err := json.NewDecoder(resp.Body).Decode(&w); err != nil {
 		return fmt.Errorf("wham/usage: decode: %w", err)
 	}
+	mapWhamUsage(&w, snap)
+	return nil
+}
+
+// whamPayload 是 wham/usage 的响应体。usage_based 套餐 rate_limit 为 null——
+// 额度按 credits/spend_control 判定，没有窗口百分比。
+type whamPayload struct {
+	Email    string `json:"email"`
+	UserID   string `json:"user_id"`
+	PlanType string `json:"plan_type"`
+	RateLimit *struct {
+		Allowed          bool        `json:"allowed"`
+		LimitReached     bool        `json:"limit_reached"`
+		PrimaryWindow    *whamWindow `json:"primary_window"`
+		SecondaryWindow  *whamWindow `json:"secondary_window"`
+	} `json:"rate_limit"`
+	Credits struct {
+		HasCredits          bool     `json:"has_credits"`
+		Unlimited           bool     `json:"unlimited"`
+		OverageLimitReached bool     `json:"overage_limit_reached"`
+		Balance             *float64 `json:"balance"`
+		ApproxLocalMessages *float64 `json:"approx_local_messages"`
+		ApproxCloudMessages *float64 `json:"approx_cloud_messages"`
+	} `json:"credits"`
+	SpendControl struct {
+		Reached         bool     `json:"reached"`
+		IndividualLimit *float64 `json:"individual_limit"`
+	} `json:"spend_control"`
+	RateLimitReachedType struct {
+		Type string `json:"type"`
+	} `json:"rate_limit_reached_type"`
+}
+
+// mapWhamUsage 把 wham 响应映射进用量快照（纯函数，便于测试）。
+func mapWhamUsage(w *whamPayload, snap *adapter.UsageSnapshot) {
 	if w.Email != "" {
 		snap.Email = w.Email
 	}
@@ -314,26 +406,53 @@ func (c *httpClient) fillWhamUsage(ctx context.Context, sec Secret, snap *adapte
 		snap.IndividualPlan = w.PlanType
 	}
 	var peak float64
-	if pw := w.RateLimit.PrimaryWindow; pw != nil {
-		v := pw.UsedPercent
-		snap.AutoPercentUsed = &v
-		peak = v
-	}
-	if sw := w.RateLimit.SecondaryWindow; sw != nil {
-		v := sw.UsedPercent
-		snap.APIPercentUsed = &v
-		if v > peak {
+	hasWindow := false
+	if rl := w.RateLimit; rl != nil {
+		if pw := rl.PrimaryWindow; pw != nil {
+			v := pw.UsedPercent
+			snap.AutoPercentUsed = &v
 			peak = v
+			hasWindow = true
 		}
-		if sw.ResetAfterSeconds > 0 {
-			snap.BillingCycleEnd = time.Now().Unix() + sw.ResetAfterSeconds
+		if sw := rl.SecondaryWindow; sw != nil {
+			v := sw.UsedPercent
+			snap.APIPercentUsed = &v
+			if v > peak {
+				peak = v
+			}
+			if sw.ResetAfterSeconds > 0 {
+				snap.BillingCycleEnd = time.Now().Unix() + sw.ResetAfterSeconds
+			}
+			hasWindow = true
+		}
+		if hasWindow {
+			if rl.LimitReached && peak < quotaHardLimit {
+				peak = quotaHardLimit
+			}
+			snap.TotalPercentUsed = &peak
 		}
 	}
-	if w.RateLimit.PrimaryWindow != nil || w.RateLimit.SecondaryWindow != nil {
-		if w.RateLimit.LimitReached && peak < quotaHardLimit {
-			peak = quotaHardLimit
+	// usage_based/计费制账号：rate_limit 为 null，额度看 credits/spend_control。
+	// 欠费（workspace_member_credits_depleted 等）→ 顶满总用量，让 QuotaDisableReason 熔断。
+	depleted := w.SpendControl.Reached || w.Credits.OverageLimitReached || w.RateLimitReachedType.Type != "" ||
+		(w.RateLimit != nil && w.RateLimit.LimitReached && !hasWindow)
+	if !hasWindow && depleted {
+		v := quotaHardLimit
+		snap.TotalPercentUsed = &v
+	}
+	if t := w.RateLimitReachedType.Type; t != "" {
+		snap.OnDemandLimitType = t
+	}
+	// 消费上限/余额（credits.balance 单位是美分剩余额度）。
+	if lim := w.SpendControl.IndividualLimit; lim != nil && *lim > 0 {
+		snap.PlanLimitCents = lim
+		if bal := w.Credits.Balance; bal != nil {
+			used := *lim - *bal
+			if used < 0 {
+				used = 0
+			}
+			snap.PlanUsedCents = &used
 		}
-		snap.TotalPercentUsed = &peak
 	}
 	if w.Credits.Unlimited {
 		snap.Unlimited = true
@@ -342,7 +461,6 @@ func (c *httpClient) fillWhamUsage(ctx context.Context, sec Secret, snap *adapte
 		on := true
 		snap.OnDemandEnabled = &on
 	}
-	return nil
 }
 
 // quotaHardLimit 触发限流熔断的百分比（与 adapter.quotaFullPercent 对齐）。

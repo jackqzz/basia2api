@@ -140,6 +140,46 @@ func parseModelID(id string) (base, level string, max bool) {
 	return id, "", false
 }
 
+// Lookup 按 ID 或别名在目录里找条目；剥掉 -thinking-*/-high/-fast 等变体后缀再比。
+// 用于入口层校验：不在目录里的模型本地 400，不打到上游吃 403。
+func (mc *memoryCatalog) Lookup(id string) (*ModelInfo, bool) {
+	infos, err := mc.Load()
+	if err != nil || len(infos) == 0 {
+		return nil, false
+	}
+	base := stripVariant(strings.TrimSpace(id))
+	for _, m := range infos {
+		if m.ID == id || m.ID == base {
+			return m, true
+		}
+		for _, a := range m.Aliases {
+			if a == id || a == base {
+				return m, true
+			}
+		}
+	}
+	return nil, false
+}
+
+// NormalizeEffort 归一客户端档位名 → 上游 reasoning.effort 值。
+// minimal→low，max/ultra→xhigh，none→none；空或无法识别返回 ""（=不写字段）。
+func NormalizeEffort(effort string) string {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "minimal", "min", "low":
+		return "low"
+	case "medium":
+		return "medium"
+	case "high":
+		return "high"
+	case "xhigh", "max", "ultra":
+		return "xhigh"
+	case "none":
+		return "none"
+	default:
+		return ""
+	}
+}
+
 func (mc *memoryCatalog) Resolve(id string) (string, string, bool) {
 	base, level, max := parseModelID(id)
 	if infos, err := mc.Load(); err == nil {

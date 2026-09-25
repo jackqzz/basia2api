@@ -8,7 +8,8 @@ import (
 
 // 实时速率计量（CAPACITY-PLAN M1）：1s 粒度环形桶，全局 + 按模型。
 // 打点全部挂在 access-log 中间件（所有请求的唯一收口），零业务侵入。
-// RPM 口径 = /v1/* API 请求；admin/静态不计。TPM = prompt+completion tokens。
+// RPM 口径 = 推理端点（isInferencePath：chat/responses/messages/gemini），
+// admin/静态/轻量接口不计。TPM = prompt+completion tokens。
 const (
 	meterBuckets = 180 // 3 分钟 @1s
 	meterWindow  = 60  // RPM/TPM 主口径窗口

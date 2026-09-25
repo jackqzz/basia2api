@@ -1,9 +1,11 @@
 package api
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"bps-2api/internal/adapter"
@@ -70,6 +72,42 @@ func (s *Server) resolveModel(name string) string {
 		def = s.cfg.DefaultModel
 	}
 	return CleanAnthropicModelName(name, s.mergedModelRoutes(), def)
+}
+
+// validateUpstreamModel 在打上游之前校验模型名与思考档位：
+// 不在目录（或该账号 entitlement）里的模型 → 本地 400，附可用列表；
+// 非法/该模型不支持的 effort → 本地 400。目录加载失败时放行（不拦请求）。
+// 返回 (param, message, ok)。
+func (s *Server) validateUpstreamModel(model, rawEffort string) (string, string, bool) {
+	infos, err := s.catalog.Load()
+	if err != nil || len(infos) == 0 {
+		return "", "", true // 目录不可用时不拦——宁可让上游回错误也不能全灭
+	}
+	mi, ok := s.catalog.Lookup(model)
+	if !ok || mi == nil {
+		ids := s.catalog.PublicModelIDs()
+		return "model", fmt.Sprintf("model %q is not available for this account; available models: %s", model, strings.Join(ids, ", ")), false
+	}
+	// 有效档位 = 显式 reasoning_effort 优先，否则模型名后缀。
+	eff := ""
+	if rawEffort != "" {
+		eff = adapter.NormalizeEffort(rawEffort)
+		if eff == "" {
+			return "reasoning_effort", fmt.Sprintf("unsupported reasoning effort %q; supported values: minimal, low, medium, high, xhigh, none", rawEffort), false
+		}
+	} else {
+		_, lvl, _ := adapter.ParseModelID(model)
+		eff = adapter.NormalizeEffort(lvl)
+	}
+	if eff != "" && len(mi.Efforts) > 0 {
+		for _, e := range mi.Efforts {
+			if e == eff {
+				return "", "", true
+			}
+		}
+		return "reasoning_effort", fmt.Sprintf("model %q does not support reasoning effort %q; supported: %s", mi.ID, eff, strings.Join(mi.Efforts, ", ")), false
+	}
+	return "", "", true
 }
 
 func (s *Server) applyRuntimeSideEffects() {

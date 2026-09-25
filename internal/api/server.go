@@ -477,6 +477,12 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	applyOpenAIThinkingDefaults(&req)
 	req.Model = s.resolveModel(req.Model)
+	if param, msg, ok := s.validateUpstreamModel(req.Model, req.ReasoningEffort); !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": map[string]string{"message": msg, "type": "invalid_request_error", "param": param, "code": "model_not_found"},
+		})
+		return
+	}
 
 	agentReq, err := MapChat(r.Context(), &req, s.promptText())
 	if err != nil {
@@ -1501,10 +1507,11 @@ func (s *Server) logMiddleware(next http.Handler) http.Handler {
 			RequestID: rid,
 			Headers:   admin.SanitizeHeaders(r.Header),
 		}
-		// M1 速率计量 + M2 入口闸门：/v1/* 先计数再拿并发槽；
+		// M1 速率计量 + M2 入口闸门：只有真推理端点才计数/占并发槽；
+		// /v1/models、/v1/auth/* 等轻量接口不占容量也不进 RPM。
 		// 排队超时回 429（不调 next，access-log/计量经下方收尾自然覆盖）。
-		isAPI := strings.HasPrefix(r.URL.Path, "/v1/")
-		if isAPI {
+		isInference := isInferencePath(r.URL.Path)
+		if isInference {
 			s.meters.Incoming()
 		}
 		out := http.ResponseWriter(w)
@@ -1529,7 +1536,7 @@ func (s *Server) logMiddleware(next http.Handler) http.Handler {
 		if dbg != nil {
 			ctx = debugtrace.With(ctx, dbg)
 		}
-		if isAPI {
+		if isInference {
 			if gch, ok := s.gateAcquire(ctx); ok {
 				if gch != nil { // nil=闸门未启用（空池/未配容量），直通不占槽
 					defer func() { <-gch }() // 释放捕获的获取时 channel（resize 安全）
@@ -1565,11 +1572,30 @@ func (s *Server) logMiddleware(next http.Handler) http.Handler {
 			})
 		}
 		s.logs.Add(*entry)
-		if isAPI {
+		if isInference {
 			s.meters.Done(entry.Model, entry.Status, entry.Prompt, entry.Completion, entry.RetryCount)
 		}
 		log.Printf("%s %s (%s) account=%s model=%s request_id=%s", r.Method, r.URL.Path, time.Since(start).Round(time.Millisecond), entry.Account, entry.Model, entry.RequestID)
 	})
+}
+
+// isInferencePath 判定真正消耗上游容量的推理端点（meter RPM/闸门口径）。
+// /v1/models 目录、/v1/auth/*、/v1/accounts 等轻量接口不计；
+// 注意 /v1/models/{m}:generateContent 是 Gemini 推理（路径带冒号动作），要算。
+func isInferencePath(p string) bool {
+	switch p {
+	case "/v1/chat/completions", "/v1/responses",
+		"/v1/messages", "/messages",
+		"/v1/messages/count_tokens", "/messages/count_tokens":
+		return true
+	}
+	if strings.HasPrefix(p, "/v1beta/models/") {
+		return true
+	}
+	if strings.HasPrefix(p, "/v1/models/") && strings.Contains(p, ":") {
+		return true
+	}
+	return false
 }
 
 func skipAccessLog(path string) bool {

@@ -207,6 +207,10 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
+	if _, msg, ok := s.validateUpstreamModel(chatReq.Model, chatReq.ReasoningEffort); !ok {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", msg)
+		return
+	}
 
 	agentReq, err := MapChat(r.Context(), chatReq, s.promptText())
 	if err != nil {

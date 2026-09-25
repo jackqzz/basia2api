@@ -35,6 +35,7 @@ type Catalog interface {
 	Load() ([]*ModelInfo, error)
 	Refresh() ([]*ModelInfo, error)
 	Resolve(id string) (serverName, thinkingLevel string, maxMode bool)
+	Lookup(id string) (*ModelInfo, bool)
 	ResolveWithThinking(id string, thinkingEnabled bool, effort string) (string, string, bool)
 	PublicModelIDs() []string
 	BareModelIDs() []string

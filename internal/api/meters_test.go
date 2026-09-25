@@ -130,3 +130,27 @@ func TestGateRejectionReturns429(t *testing.T) {
 		t.Fatal("missing Retry-After header")
 	}
 }
+
+func TestIsInferencePath(t *testing.T) {
+	cases := map[string]bool{
+		"/v1/chat/completions":                       true,
+		"/v1/responses":                              true,
+		"/v1/messages":                               true,
+		"/messages":                                  true,
+		"/v1/models/gpt-5:generateContent":           true,
+		"/v1beta/models/gpt-5:streamGenerateContent": true,
+		"/v1/models":                                 false,
+		"/v1/models/refresh":                         false,
+		"/v1/auth/status":                            false,
+		"/v1/accounts":                               false,
+		"/v1/accounts/import":                        false,
+		"/v1/login":                                  false,
+		"/api/admin/metrics":                         false,
+		"/admin/pool":                                false,
+	}
+	for p, want := range cases {
+		if got := isInferencePath(p); got != want {
+			t.Errorf("%s: got %v want %v", p, got, want)
+		}
+	}
+}

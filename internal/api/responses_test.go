@@ -17,7 +17,7 @@ import (
 
 // developer 是 Responses 里 system 的新名字，丢了就等于丢顶层指令。
 func TestResponsesDeveloperRoleBecomesSystem(t *testing.T) {
-	req := &ResponsesRequest{Model: "m"}
+	req := &ResponsesRequest{Model: "gpt-5.6-sol"}
 	req.Input = json.RawMessage(`[
 		{"type":"message","role":"developer","content":"Never edit files without asking."},
 		{"type":"message","role":"user","content":"hi"}
@@ -33,7 +33,7 @@ func TestResponsesDeveloperRoleBecomesSystem(t *testing.T) {
 
 // developer 的 content 也可能是 parts 数组，映射后同样要摊平。
 func TestResponsesDeveloperRoleWithParts(t *testing.T) {
-	req := &ResponsesRequest{Model: "m"}
+	req := &ResponsesRequest{Model: "gpt-5.6-sol"}
 	req.Input = json.RawMessage(`[
 		{"type":"message","role":"developer","content":[{"type":"input_text","text":"码农模式"}]},
 		{"type":"message","role":"user","content":"go"}
@@ -52,7 +52,7 @@ func TestResponsesDeveloperRoleWithParts(t *testing.T) {
 
 // reasoning 条目无 role，跳过即可（加密推理只有上游能解），但不能因此丢别的条目。
 func TestResponsesSkipsReasoningItems(t *testing.T) {
-	req := &ResponsesRequest{Model: "m"}
+	req := &ResponsesRequest{Model: "gpt-5.6-sol"}
 	req.Input = json.RawMessage(`[
 		{"type":"reasoning","summary":[{"type":"summary_text","text":"thinking…"}],"encrypted_content":"gAAAA"},
 		{"type":"message","role":"user","content":"go"}
@@ -70,7 +70,7 @@ func TestResponsesSkipsReasoningItems(t *testing.T) {
 // 我们没有原生 tools 通道（靠提示词仿真），所以要把它描述成「单 input 字符串参数」，
 // 回程再还原成 custom_tool_call/{input} —— 否则 Codex 认不出这个项，补丁工具链就断在这里。
 func TestResponsesCustomToolDescribedAsSingleInput(t *testing.T) {
-	req := &ResponsesRequest{Model: "m"}
+	req := &ResponsesRequest{Model: "gpt-5.6-sol"}
 	req.Tools = []responsesTool{
 		{Type: "custom", Name: "apply_patch", Description: "Apply a freeform patch"},
 		{Type: "function", Name: "shell", Parameters: json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"}}}`)},
@@ -122,7 +122,7 @@ func TestResponsesCustomToolCallOutputShape(t *testing.T) {
 			FinishReason string      `json:"finish_reason"`
 		} `json:"choices"`
 		Usage *Usage `json:"usage"`
-	}{Model: "m"}
+	}{Model: "gpt-5.6-sol"}
 	chatResp.Choices = append(chatResp.Choices, struct {
 		Message      ChatMessage `json:"message"`
 		FinishReason string      `json:"finish_reason"`
@@ -213,7 +213,7 @@ func TestResponsesCustomToolStreamsCustomToolCall(t *testing.T) {
 		{Ended: true},
 	}}
 
-	w := responsesPOST(t, s, `{"model":"m","stream":true,"input":[{"type":"message","role":"user","content":"patch it"}],`+
+	w := responsesPOST(t, s, `{"model":"gpt-5.6-sol","stream":true,"input":[{"type":"message","role":"user","content":"patch it"}],`+
 		`"tools":[{"type":"custom","name":"apply_patch","description":"Apply a patch"}]}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("状态码 = %d: %s", w.Code, w.Body.String())
@@ -261,7 +261,7 @@ func TestResponsesStreamTurnFailureIsFailedEvent(t *testing.T) {
 		err:    errors.New("bps: upstream sandbox degraded: new backend: context deadline exceeded"),
 	}
 
-	w := responsesPOST(t, s, `{"model":"m","stream":true,"input":[{"type":"message","role":"user","content":"go"}]}`)
+	w := responsesPOST(t, s, `{"model":"gpt-5.6-sol","stream":true,"input":[{"type":"message","role":"user","content":"go"}]}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("流式已开 SSE，状态码仍是 200，得到 %d: %s", w.Code, w.Body.String())
 	}
@@ -287,7 +287,7 @@ func TestResponsesStreamTurnFailureIsFailedEvent(t *testing.T) {
 // custom_tool_call_output 回灌后要出现在 chat 请求的 tool 消息里，且 call_id 对应。
 // 否则第二轮续接时模型看不到工具结果，上下文断裂。
 func TestResponsesCustomToolCallOutputRoundTrip(t *testing.T) {
-	req := &ResponsesRequest{Model: "m"}
+	req := &ResponsesRequest{Model: "gpt-5.6-sol"}
 	req.Input = json.RawMessage(`[
 		{"type":"custom_tool_call_output","call_id":"call_7","output":"patched ok"},
 		{"type":"function_call_output","call_id":"call_8","output":[{"type":"input_text","text":"done"}]}
@@ -323,7 +323,7 @@ func TestResponsesCustomToolCallOutputRoundTrip(t *testing.T) {
 // custom_tool_call 续接的 arguments 必须是 {"input":"..."} 形状，
 // 与出站描述的单 input 参数一致，否则回灌后对不上。
 func TestResponsesCustomToolCallRoundTrip(t *testing.T) {
-	req := &ResponsesRequest{Model: "m"}
+	req := &ResponsesRequest{Model: "gpt-5.6-sol"}
 	req.Input = json.RawMessage(`[
 		{"type":"custom_tool_call","call_id":"call_9","name":"apply_patch","input":"*** Begin Patch\n*** End Patch\n"},
 		{"type":"custom_tool_call","call_id":"call_10","name":"apply_patch","input":{"path":"a.go","diff":"x"}}

@@ -23,24 +23,53 @@ import { formatDisableReason, formatTime } from "@/lib/format";
 import { useUIStore } from "@/stores/ui";
 import type { Account } from "@/types/api";
 
-async function submitImport(raw: string, overwrite: boolean) {
+function parseImportPayload(raw: string): { accounts?: unknown[]; text?: string } {
   const text = raw.trim();
-  if (!text) throw new Error("没有可导入的内容");
+  if (!text) return {};
   if (text.startsWith("{") || text.startsWith("[")) {
     const parsed = JSON.parse(text) as { accounts?: unknown[]; text?: string } | unknown[];
     if (Array.isArray(parsed)) {
-      return adminApi.importAccounts({ accounts: parsed, overwrite });
+      return { accounts: parsed };
     }
     if (parsed.text && !parsed.accounts?.length) {
-      return adminApi.importAccounts({ text: parsed.text, overwrite });
+      return { text: parsed.text };
     }
     if (parsed.accounts?.length) {
-      return adminApi.importAccounts({ accounts: parsed.accounts, text: parsed.text, overwrite });
+      return { accounts: parsed.accounts, text: parsed.text };
     }
     // 单个账号对象（cpa/codex 凭证文件、auth.json）：包成数组交给后端解析。
-    return adminApi.importAccounts({ accounts: [parsed], overwrite });
+    return { accounts: [parsed] };
   }
-  return adminApi.importAccounts({ text, overwrite });
+  return { text };
+}
+
+async function submitImport(raw: string, overwrite: boolean) {
+  const payload = parseImportPayload(raw);
+  if (!payload.accounts && !payload.text) throw new Error("没有可导入的内容");
+  return adminApi.importAccounts({ ...payload, overwrite });
+}
+
+// submitFiles 把多份文件合并成一次导入任务：JSON 对象/数组并入 accounts，
+// 行格式文本拼成一份 text。cpa 凭证多选场景走这里。
+async function submitFiles(files: File[], overwrite: boolean) {
+  const accounts: unknown[] = [];
+  const texts: string[] = [];
+  for (const f of files) {
+    let payload: { accounts?: unknown[]; text?: string };
+    try {
+      payload = parseImportPayload(await f.text());
+    } catch (err) {
+      throw new Error(`${f.name}: ${err instanceof Error ? err.message : "解析失败"}`);
+    }
+    if (payload.accounts) accounts.push(...payload.accounts);
+    if (payload.text) texts.push(payload.text);
+  }
+  if (accounts.length === 0 && texts.length === 0) throw new Error("没有可导入的内容");
+  return adminApi.importAccounts({
+    accounts: accounts.length > 0 ? accounts : undefined,
+    text: texts.length > 0 ? texts.join("\n") : undefined,
+    overwrite,
+  });
 }
 
 function toneOf(a: Account): "ok" | "warn" | "err" | "muted" {
@@ -167,17 +196,19 @@ export function AccountsPage() {
             <input
               ref={fileRef}
               type="file"
+              multiple
               accept="application/json,.json,.txt,text/plain"
               className="hidden"
               onChange={async (e) => {
-                const file = e.target.files?.[0];
+                const files = Array.from(e.target.files ?? []);
                 e.target.value = "";
-                if (!file) return;
+                if (files.length === 0) return;
                 try {
-                  const res = await submitImport(await file.text(), overwrite);
-                  toast.success("导入任务已排队", {
+                  const res = await submitFiles(files, overwrite);
+                  toast.success(`导入任务已排队（${files.length} 个文件）`, {
                     action: { label: "查看任务", onClick: () => nav(`/tasks/${res.task.id}`) },
                   });
+                  setImportOpen(false);
                 } catch (err) {
                   toast.error(err instanceof Error ? err.message : "导入失败");
                 }
@@ -317,7 +348,7 @@ export function AccountsPage() {
         <DialogContent className="w-[min(720px,calc(100vw-24px))]">
           <DialogTitle>导入账号</DialogTitle>
           <DialogDesc>
-            支持逐行 `email----password----token`、JSON 数组、单个凭证对象（cpa/codex 凭证 JSON、auth.json），或选择文件。
+            支持逐行 `email----password----token`、JSON 数组、单个凭证对象（cpa/codex 凭证 JSON、auth.json），或选择文件（可多选）。
           </DialogDesc>
           <div className="mt-4 space-y-3">
             <Textarea

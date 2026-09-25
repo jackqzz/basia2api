@@ -70,7 +70,7 @@ func TestStreamChatEmptyCompletionRetriesNextAccount(t *testing.T) {
 		emitEndedOnly(emit)
 	})
 
-	w := chatCompletionsPOST(t, s, `{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	w := chatCompletionsPOST(t, s, `{"model":"gpt-5.6-sol","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("状态码 = %d: %s", w.Code, w.Body.String())
 	}
@@ -95,7 +95,7 @@ func TestStreamChatEmptyCompletionExhaustedIsError(t *testing.T) {
 		emitEndedOnly(emit)
 	})
 
-	w := chatCompletionsPOST(t, s, `{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	w := chatCompletionsPOST(t, s, `{"model":"gpt-5.6-sol","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
 	body := w.Body.String()
 	if !strings.Contains(body, "bps: upstream returned empty completion") {
 		t.Fatalf("终态应带 empty completion 错误帧:\n%s", body)
@@ -122,7 +122,7 @@ func TestNonStreamChatEmptyCompletionRetriesNextAccount(t *testing.T) {
 		emitEndedOnly(emit)
 	})
 
-	w := chatCompletionsPOST(t, s, `{"model":"m","stream":false,"messages":[{"role":"user","content":"hi"}]}`)
+	w := chatCompletionsPOST(t, s, `{"model":"gpt-5.6-sol","stream":false,"messages":[{"role":"user","content":"hi"}]}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("状态码 = %d: %s", w.Code, w.Body.String())
 	}
@@ -159,7 +159,7 @@ func TestNonStreamChatEmptyCompletionExhaustedIs502(t *testing.T) {
 		emitEndedOnly(emit)
 	})
 
-	w := chatCompletionsPOST(t, s, `{"model":"m","stream":false,"messages":[{"role":"user","content":"hi"}]}`)
+	w := chatCompletionsPOST(t, s, `{"model":"gpt-5.6-sol","stream":false,"messages":[{"role":"user","content":"hi"}]}`)
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("空完成终态应 502，实际 %d: %s", w.Code, w.Body.String())
 	}
@@ -181,7 +181,7 @@ func TestStreamChatBlockedToolNoteCountsCompletion(t *testing.T) {
 		emitEndedOnly(emit)
 	})
 
-	w := chatCompletionsPOST(t, s, `{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}],`+
+	w := chatCompletionsPOST(t, s, `{"model":"gpt-5.6-sol","stream":true,"messages":[{"role":"user","content":"hi"}],`+
 		`"tools":[{"type":"function","function":{"name":"exec","description":"run","parameters":{"type":"object"}}}]}`)
 	body := w.Body.String()
 	if !strings.Contains(body, "上游工具受限") {

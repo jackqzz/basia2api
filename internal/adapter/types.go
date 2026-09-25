@@ -151,6 +151,8 @@ type ModelInfo struct {
 	Price             float64
 	MaxMode           bool
 	ThinkingLevel     string
+	// Efforts 是该模型上游接受的 reasoning.effort 白名单（空=未知，放行）。
+	Efforts []string
 }
 
 // UsageSnapshot is official-quota cache shown on the admin usage page.

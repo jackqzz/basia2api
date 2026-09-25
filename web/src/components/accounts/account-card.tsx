@@ -51,7 +51,7 @@ export function AccountCard({
   };
 
   return (
-    <Card interactive className="flex h-full flex-col p-3">
+    <Card className="flex h-full flex-col p-3">
       <div className="flex items-start gap-2">
         <Checkbox checked={checked} onCheckedChange={(v) => onCheck(v === true)} />
         <div className="grid size-7 shrink-0 place-items-center rounded-md bg-linen font-mono text-[11px] text-ink">
@@ -68,9 +68,7 @@ export function AccountCard({
               </Badge>
             ))}
           </div>
-          <Link to={`/accounts/${encodeURIComponent(a.name)}`} className="mt-1 block truncate text-[14px] text-ink hover:text-ember">
-            {title}
-          </Link>
+          <div className="mt-1 truncate text-[14px] text-ink">{title}</div>
           {a.workos_id ? <div className="truncate font-mono text-[11px] text-ash">Auth ID {a.workos_id}</div> : a.email && a.email !== a.name ? <div className="truncate font-mono text-[11px] text-ash">{a.name}</div> : null}
         </div>
         <div className="shrink-0 text-right">
@@ -131,9 +129,9 @@ export function AccountCard({
         <Button variant="outline" size="icon" className="size-8" aria-label="刷新用量" disabled={refreshing} onClick={refresh}>
           <RefreshCw className={cn(refreshing && "animate-spin")} />
         </Button>
-        <Button variant="outline" size="icon" className="size-8" aria-label="设置" asChild>
+        <Button variant="outline" size="sm" className="h-8 px-2" asChild>
           <Link to={`/accounts/${encodeURIComponent(a.name)}`}>
-            <Settings2 />
+            <Settings2 /> 详情
           </Link>
         </Button>
         <Button variant="outline" size="icon" className="size-8" aria-label="删除" onClick={onDelete}>
