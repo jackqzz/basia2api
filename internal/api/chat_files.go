@@ -65,6 +65,9 @@ type extractedFile struct {
 	Mime string // 可能为空
 	Data []byte
 	Text string // 文本类附件（text/*、PDF…）抽出的正文；图片为空
+	// URL 是 http(s) 图片的原始地址：上游只认 URL 抓取（data: 一律 422），
+	// 这类 part 不再代拉成字节，原样透传让上游自己抓。
+	URL string
 }
 
 // textLike 判断这个附件要不要预抽文本：上游没有二进制通道，
@@ -136,7 +139,13 @@ func extractFiles(ctx context.Context, raw json.RawMessage) []extractedFile {
 		}
 		s := slot{idx: i, typ: p.Type, name: name, payload: payload}
 		if isRemoteURL(payload) {
-			s.remote = true
+			// 图片 part 不代拉：上游只收 http(s) URL 的 input_image（实测能抓
+			// 公网图），代拉成 base64 反而会被它 422。URL 原样透传。
+			if p.ImageURL != nil {
+				s.file = extractedFile{Name: strings.TrimSpace(name), URL: payload}
+			} else {
+				s.remote = true
+			}
 		} else {
 			// 本地载荷：与串行版同一调用，语义不动。
 			s.file, s.err = resolveAttachment(ctx, strings.TrimSpace(name), payload)

@@ -69,21 +69,45 @@ func TestExtractFilesAcrossProtocolShapes(t *testing.T) {
 	}
 }
 
-// 远端地址由服务端代拉（很多客户端直接传 URL 而不是 data: URL）。
-func TestExtractFilesFetchesRemoteURL(t *testing.T) {
-	body := []byte("remote-image-bytes")
+// 远端图片不代拉：上游 input_image 只收 http(s) URL 并服务端代抓（data: 一律 422），
+// 原样透传 URL；本地服务不应收到任何请求。
+func TestExtractFilesPreservesRemoteImageURL(t *testing.T) {
+	var hits int32
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "image/webp")
+		hits++
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	defer ts.Close()
+
+	u := ts.URL + "/shots/cat.webp"
+	got := extractFiles(context.Background(), json.RawMessage(
+		`[{"type":"image_url","image_url":{"url":"`+u+`"}}]`))
+	if len(got) != 1 {
+		t.Fatalf("got %+v, want one URL attachment", got)
+	}
+	if got[0].URL != u || len(got[0].Data) != 0 {
+		t.Fatalf("远端图片应保留 URL 不代拉，got %+v", got[0])
+	}
+	if hits != 0 {
+		t.Fatalf("远端图片不应触发代拉，hits=%d", hits)
+	}
+}
+
+// 非图片远端附件（file/input_file 的 URL 载荷）仍由服务端代拉。
+func TestExtractFilesFetchesRemoteURL(t *testing.T) {
+	body := []byte("remote-doc-bytes")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/pdf")
 		_, _ = w.Write(body)
 	}))
 	defer ts.Close()
 
 	got := extractFiles(context.Background(), json.RawMessage(
-		`[{"type":"image_url","image_url":{"url":"`+ts.URL+`/shots/cat.webp"}}]`))
+		`[{"type":"file","file":{"filename":"","file_data":"`+ts.URL+`/docs/cat.pdf"}}]`))
 	if len(got) != 1 {
 		t.Fatalf("got %+v, want one fetched attachment", got)
 	}
-	if got[0].Mime != "image/webp" || string(got[0].Data) != string(body) || got[0].Name != "cat.webp" {
+	if got[0].Mime != "application/pdf" || string(got[0].Data) != string(body) || got[0].Name != "cat.pdf" {
 		t.Fatalf("远端附件 = %+v (name 应取 URL 末段、MIME 取响应头)", got[0])
 	}
 }
@@ -96,7 +120,7 @@ func TestExtractFilesDropsUnreachableURL(t *testing.T) {
 	defer ts.Close()
 
 	got := extractFiles(context.Background(), json.RawMessage(
-		`[{"type":"text","text":"看图"},{"type":"image_url","image_url":{"url":"`+ts.URL+`/gone.png"}}]`))
+		`[{"type":"text","text":"看图"},{"type":"file","file":{"filename":"","file_data":"`+ts.URL+`/gone.pdf"}}]`))
 	if len(got) != 0 {
 		t.Fatalf("404 的远端附件应被丢弃，got %+v", got)
 	}
@@ -193,9 +217,9 @@ func TestExtractFilesFetchesRemoteURLsConcurrently(t *testing.T) {
 	defer ts.Close()
 
 	raw := json.RawMessage(
-		`[{"type":"image_url","image_url":{"url":"` + ts.URL + `/slow-a.bin"}},` +
-			`{"type":"image_url","image_url":{"url":"` + ts.URL + `/slow-b.bin"}},` +
-			`{"type":"image_url","image_url":{"url":"` + ts.URL + `/slow-c.bin"}}]`)
+		`[{"type":"file","file":{"filename":"","file_data":"` + ts.URL + `/slow-a.bin"}},` +
+			`{"type":"file","file":{"filename":"","file_data":"` + ts.URL + `/slow-b.bin"}},` +
+			`{"type":"file","file":{"filename":"","file_data":"` + ts.URL + `/slow-c.bin"}}]`)
 	start := time.Now()
 	got := extractFiles(context.Background(), raw)
 	elapsed := time.Since(start)
@@ -238,9 +262,9 @@ func TestExtractFilesConcurrentFetchDropsOnlyFailed(t *testing.T) {
 	defer ts.Close()
 
 	got := extractFiles(context.Background(), json.RawMessage(
-		`[{"type":"image_url","image_url":{"url":"`+ts.URL+`/ok-a.bin"}},`+
-			`{"type":"image_url","image_url":{"url":"`+ts.URL+`/gone.bin"}},`+
-			`{"type":"image_url","image_url":{"url":"`+ts.URL+`/ok-b.bin"}}]`))
+		`[{"type":"file","file":{"filename":"","file_data":"`+ts.URL+`/ok-a.bin"}},`+
+			`{"type":"file","file":{"filename":"","file_data":"`+ts.URL+`/gone.bin"}},`+
+			`{"type":"file","file":{"filename":"","file_data":"`+ts.URL+`/ok-b.bin"}}]`))
 	if len(got) != 2 {
 		t.Fatalf("404 只丢自己，got %+v", got)
 	}

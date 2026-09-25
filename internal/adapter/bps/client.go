@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -124,6 +127,7 @@ func (c *httpClient) Stream(ctx context.Context, nr *adapter.NativeRequest, emit
 	if err != nil {
 		return err
 	}
+	c.prepareImages(ctx, sec, nr)
 	body, err := json.Marshal(buildRequestBody(nr))
 	if err != nil {
 		return fmt.Errorf("bps: encode request: %w", err)
@@ -147,9 +151,23 @@ func (c *httpClient) Stream(ctx context.Context, nr *adapter.NativeRequest, emit
 			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 			resp.Body.Close()
 			upErr := &upstreamError{Status: resp.StatusCode, Msg: truncate(strings.TrimSpace(string(raw)), 400)}
+			// 图片 URL 被上游 fetch 403（SAS 过期/跨账号复用）：废掉缓存、按当前
+			// 账号重新上传、重试一次——救回整轮而不是直接拒。
+			if resp.StatusCode == http.StatusBadRequest &&
+				strings.Contains(upErr.Msg, "downloading file") && c.refreshImages(ctx, sec, nr) {
+				if nb, merr := json.Marshal(buildRequestBody(nr)); merr == nil {
+					body = nb
+					lastErr = upErr
+					continue
+				}
+			}
 			if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
 				lastErr = upErr
 				continue
+			}
+			// 4xx 拒单：把出站请求体落盘供排查（入站客户端不可见，含我们拼的 envelope）。
+			if resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnprocessableEntity {
+				dumpRejectedBody(body, nr.Model)
 			}
 			return upErr
 		}
@@ -161,6 +179,15 @@ func (c *httpClient) Stream(ctx context.Context, nr *adapter.NativeRequest, emit
 		return err
 	}
 	return lastErr
+}
+
+// dumpRejectedBody 上游 4xx 时把出站请求体落盘：/tmp/bps-reject-<ts>-<model>.json。
+// 含 run_officejs envelope 明文——仅本地排查用，不回客户端。
+func dumpRejectedBody(body []byte, model string) {
+	name := fmt.Sprintf("/tmp/bps-reject-%d-%s.json", time.Now().UnixMilli(), strings.NewReplacer("/", "_", " ", "_").Replace(model))
+	if err := os.WriteFile(name, body, 0o600); err == nil {
+		log.Printf("bps: upstream rejected request body -> %s (model=%q, %d bytes)", name, model, len(body))
+	}
 }
 
 // credential 取当前 token 并解析出 access token / account id。
@@ -220,6 +247,10 @@ func (c *httpClient) do(ctx context.Context, sec Secret, body []byte) (*http.Res
 	req.Header.Set("originator", "codex-tui")
 	req.Header.Set("version", firstNonEmpty(strings.TrimSpace(c.clientVersion), defaultClientVersion))
 	req.Header.Set("User-Agent", c.userAgent())
+	if os.Getenv("WEB2API_DUMP_OUT") != "" {
+		os.WriteFile("/tmp/bps-out.json", body, 0o600)
+		log.Printf("bps: outbound body -> /tmp/bps-out.json (%d bytes)", len(body))
+	}
 	return c.httpClientRef().Do(req)
 }
 
@@ -323,11 +354,39 @@ func (c *httpClient) FetchUsage(ctx context.Context, websiteURL string) (adapter
 	return snap, nil
 }
 
+// whamInt 同 whamFloat：窗口秒数在部分账号上也是字符串形态。
+type whamInt int64
+
+// UnmarshalJSON 解析 number 或 string 为 int64；null/空串/非标量视为缺省。
+func (i *whamInt) UnmarshalJSON(b []byte) error {
+	s := strings.TrimSpace(string(b))
+	if s == "" || s == "null" {
+		return nil
+	}
+	if s[0] == '"' {
+		var str string
+		if err := json.Unmarshal(b, &str); err != nil {
+			return err
+		}
+		s = strings.TrimSpace(str)
+		if s == "" {
+			return nil
+		}
+	} else if !(s[0] >= '0' && s[0] <= '9' || s[0] == '-' || s[0] == '+') {
+		return nil
+	}
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		*i = whamInt(int64(f))
+		return nil
+	}
+	return nil
+}
+
 // whamWindow 是 rate_limit 下的单个限流窗口（5h 主窗 / 周窗）。
 type whamWindow struct {
-	UsedPercent       float64 `json:"used_percent"`
-	LimitWindowSecs   int64   `json:"limit_window_seconds"`
-	ResetAfterSeconds int64   `json:"reset_after_seconds"`
+	UsedPercent       whamFloat `json:"used_percent"`
+	LimitWindowSecs   whamInt   `json:"limit_window_seconds"`
+	ResetAfterSeconds whamInt   `json:"reset_after_seconds"`
 }
 
 // fillWhamUsage 请求 wham/usage 并把额度字段填进快照。
@@ -362,33 +421,94 @@ func (c *httpClient) fillWhamUsage(ctx context.Context, sec Secret, snap *adapte
 	return nil
 }
 
+// whamFloat 容忍上游数字/字符串两种形态：credits.balance 在部分账号上
+// 返回 "12.34" 字符串（ted_ramirez 实测），窗口制账号返回裸数字；
+// approx_*_messages 是数组 [a,b] —— 非标量一律静默跳过，不拖死整次解码。
+type whamFloat float64
+
+// UnmarshalJSON 解析 number 或 string 为 float64；null/空串/对象/数组视为缺省。
+func (f *whamFloat) UnmarshalJSON(b []byte) error {
+	s := strings.TrimSpace(string(b))
+	if s == "" || s == "null" {
+		return nil
+	}
+	if s[0] == '"' {
+		var str string
+		if err := json.Unmarshal(b, &str); err != nil {
+			return err
+		}
+		s = strings.TrimSpace(str)
+		if s == "" {
+			return nil
+		}
+	} else if !(s[0] >= '0' && s[0] <= '9' || s[0] == '-' || s[0] == '+' || s[0] == '.') {
+		return nil // 数组/对象/true 等：字段不可用而非报错
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return nil // 不可解析的字符串也跳过
+	}
+	*f = whamFloat(v)
+	return nil
+}
+
+// ptr 返回 float64 指针（值非零时才算"有数据"交给消费端判 nil）。
+func (f *whamFloat) ptr() *float64 {
+	if f == nil {
+		return nil
+	}
+	v := float64(*f)
+	return &v
+}
+
 // whamPayload 是 wham/usage 的响应体。usage_based 套餐 rate_limit 为 null——
 // 额度按 credits/spend_control 判定，没有窗口百分比。
 type whamPayload struct {
-	Email    string `json:"email"`
-	UserID   string `json:"user_id"`
-	PlanType string `json:"plan_type"`
+	Email     string `json:"email"`
+	UserID    string `json:"user_id"`
+	PlanType  string `json:"plan_type"`
 	RateLimit *struct {
-		Allowed          bool        `json:"allowed"`
-		LimitReached     bool        `json:"limit_reached"`
-		PrimaryWindow    *whamWindow `json:"primary_window"`
-		SecondaryWindow  *whamWindow `json:"secondary_window"`
+		Allowed         bool        `json:"allowed"`
+		LimitReached    bool        `json:"limit_reached"`
+		PrimaryWindow   *whamWindow `json:"primary_window"`
+		SecondaryWindow *whamWindow `json:"secondary_window"`
 	} `json:"rate_limit"`
 	Credits struct {
-		HasCredits          bool     `json:"has_credits"`
-		Unlimited           bool     `json:"unlimited"`
-		OverageLimitReached bool     `json:"overage_limit_reached"`
-		Balance             *float64 `json:"balance"`
-		ApproxLocalMessages *float64 `json:"approx_local_messages"`
-		ApproxCloudMessages *float64 `json:"approx_cloud_messages"`
+		HasCredits          bool       `json:"has_credits"`
+		Unlimited           bool       `json:"unlimited"`
+		OverageLimitReached bool       `json:"overage_limit_reached"`
+		Balance             *whamFloat `json:"balance"`
+		ApproxLocalMessages *whamFloat `json:"approx_local_messages"`
+		ApproxCloudMessages *whamFloat `json:"approx_cloud_messages"`
 	} `json:"credits"`
 	SpendControl struct {
-		Reached         bool     `json:"reached"`
-		IndividualLimit *float64 `json:"individual_limit"`
+		Reached         bool       `json:"reached"`
+		IndividualLimit *whamFloat `json:"individual_limit"`
 	} `json:"spend_control"`
-	RateLimitReachedType struct {
-		Type string `json:"type"`
-	} `json:"rate_limit_reached_type"`
+	RateLimitReachedType whamReachedType `json:"rate_limit_reached_type"`
+}
+
+// whamReachedType 兼容 rate_limit_reached_type 的三种形态：
+// null（ted_ramirez）、{"type":"..."} 对象（pemny）、"..." 裸字符串。
+type whamReachedType struct {
+	Type string
+}
+
+// UnmarshalJSON 取对象 .type 或字符串本身；null/其它形态置空。
+func (t *whamReachedType) UnmarshalJSON(b []byte) error {
+	s := strings.TrimSpace(string(b))
+	if s == "" || s == "null" {
+		return nil
+	}
+	if s[0] == '"' {
+		return json.Unmarshal(b, &t.Type)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil
+	}
+	t.Type, _ = m["type"].(string)
+	return nil
 }
 
 // mapWhamUsage 把 wham 响应映射进用量快照（纯函数，便于测试）。
@@ -409,19 +529,19 @@ func mapWhamUsage(w *whamPayload, snap *adapter.UsageSnapshot) {
 	hasWindow := false
 	if rl := w.RateLimit; rl != nil {
 		if pw := rl.PrimaryWindow; pw != nil {
-			v := pw.UsedPercent
+			v := float64(pw.UsedPercent)
 			snap.AutoPercentUsed = &v
 			peak = v
 			hasWindow = true
 		}
 		if sw := rl.SecondaryWindow; sw != nil {
-			v := sw.UsedPercent
+			v := float64(sw.UsedPercent)
 			snap.APIPercentUsed = &v
 			if v > peak {
 				peak = v
 			}
 			if sw.ResetAfterSeconds > 0 {
-				snap.BillingCycleEnd = time.Now().Unix() + sw.ResetAfterSeconds
+				snap.BillingCycleEnd = time.Now().Unix() + int64(sw.ResetAfterSeconds)
 			}
 			hasWindow = true
 		}
@@ -445,9 +565,9 @@ func mapWhamUsage(w *whamPayload, snap *adapter.UsageSnapshot) {
 	}
 	// 消费上限/余额（credits.balance 单位是美分剩余额度）。
 	if lim := w.SpendControl.IndividualLimit; lim != nil && *lim > 0 {
-		snap.PlanLimitCents = lim
+		snap.PlanLimitCents = lim.ptr()
 		if bal := w.Credits.Balance; bal != nil {
-			used := *lim - *bal
+			used := float64(*lim) - float64(*bal)
 			if used < 0 {
 				used = 0
 			}

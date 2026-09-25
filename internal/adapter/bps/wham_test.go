@@ -78,7 +78,7 @@ func TestMapWhamUsageUsageBasedDepleted(t *testing.T) {
 
 // usage_based 有余额：不熔断，消费上限/余额映射成 used/limit 美分。
 func TestMapWhamUsageUsageBasedWithCredits(t *testing.T) {
-	lim, bal := 5000.0, 1250.0
+	lim, bal := whamFloat(5000), whamFloat(1250)
 	var w whamPayload
 	w.Credits.HasCredits = true
 	w.Credits.Balance = &bal
@@ -117,5 +117,62 @@ func TestMapWhamUsageWindowLimitReached(t *testing.T) {
 	}
 	if snap.QuotaDisableReason() == "" {
 		t.Fatal("打满窗口必须熔断")
+	}
+}
+
+// 字符串形态数字：部分账号 balance/individual_limit/used_percent 返回 "123.4"（ted_ramirez 实测）。
+func TestMapWhamUsageStringNumbers(t *testing.T) {
+	raw := `{
+		"plan_type": "self_serve_business_usage_based",
+		"rate_limit": {"allowed": true, "limit_reached": false,
+			"primary_window": {"used_percent": "12.5", "limit_window_seconds": "18000"},
+			"secondary_window": {"used_percent": "30", "reset_after_seconds": "3600"}},
+		"credits": {"has_credits": true, "unlimited": false, "overage_limit_reached": false, "balance": "1250.5"},
+		"spend_control": {"reached": false, "individual_limit": "5000"},
+		"rate_limit_reached_type": null
+	}`
+	var w whamPayload
+	if err := json.Unmarshal([]byte(raw), &w); err != nil {
+		t.Fatalf("字符串数字解码失败: %v", err)
+	}
+	var snap adapter.UsageSnapshot
+	mapWhamUsage(&w, &snap)
+	if snap.AutoPercentUsed == nil || *snap.AutoPercentUsed != 12.5 {
+		t.Fatalf("auto=%v", snap.AutoPercentUsed)
+	}
+	if snap.PlanLimitCents == nil || *snap.PlanLimitCents != 5000 {
+		t.Fatalf("limit=%v", snap.PlanLimitCents)
+	}
+	if snap.PlanUsedCents == nil || *snap.PlanUsedCents != 3749.5 {
+		t.Fatalf("used=%v", snap.PlanUsedCents)
+	}
+	if snap.BillingCycleEnd <= 0 {
+		t.Fatal("reset_after_seconds 应折算成周期结束时间")
+	}
+}
+
+// ted_ramirez 真实响应形态：pro 套餐 + balance:"0" 字符串 + approx_*:[0,0] 数组 + reached_type:null。
+func TestMapWhamUsageTedRamirezShape(t *testing.T) {
+	raw := `{
+		"plan_type": "pro",
+		"rate_limit": {"allowed": true, "limit_reached": false,
+			"primary_window": {"used_percent": 0, "limit_window_seconds": 604800, "reset_after_seconds": 601333},
+			"secondary_window": null},
+		"credits": {"has_credits": false, "unlimited": false, "overage_limit_reached": false,
+			"balance": "0", "approx_local_messages": [0, 0], "approx_cloud_messages": [0, 0]},
+		"spend_control": {"reached": false, "individual_limit": null},
+		"rate_limit_reached_type": null
+	}`
+	var w whamPayload
+	if err := json.Unmarshal([]byte(raw), &w); err != nil {
+		t.Fatalf("ted 形态解码失败: %v", err)
+	}
+	var snap adapter.UsageSnapshot
+	mapWhamUsage(&w, &snap)
+	if snap.TotalPercentUsed == nil || *snap.TotalPercentUsed != 0 {
+		t.Fatalf("total=%v", snap.TotalPercentUsed)
+	}
+	if snap.QuotaDisableReason() != "" {
+		t.Fatalf("健康 pro 账号不应熔断: %q", snap.QuotaDisableReason())
 	}
 }

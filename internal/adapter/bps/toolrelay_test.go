@@ -202,3 +202,24 @@ func TestConsumeSSERelayedCall(t *testing.T) {
 		t.Fatalf("got=%+v", got)
 	}
 }
+
+func TestMapNativeToolCallPassthroughRealOfficeJS(t *testing.T) {
+	tools := []adapter.ToolDef{shellTool}
+	// code 是真实 OfficeJS（非 JSON envelope）→ 原样透传，不丢弃
+	item := outputItem{Type: "function_call", Name: "run_officejs", CallID: "call_1",
+		Arguments: `{"summary":"read A1","code":"await Excel.run(async (ctx)=>{...})"}`}
+	call := mapNativeToolCall(item, tools)
+	if call == nil || call.Name != "run_officejs" || call.ToolCallID != "call_1" {
+		t.Fatalf("real OfficeJS should passthrough, got %+v", call)
+	}
+	if !strings.Contains(call.RawArgs, "Excel.run") {
+		t.Fatalf("args should be preserved raw, got %s", call.RawArgs)
+	}
+	// envelope 缺 inner name → 同样透传
+	item2 := outputItem{Type: "function_call", Name: "run_officejs", CallID: "call_2",
+		Arguments: `{"summary":"x","code":"{\"foo\":1}"}`}
+	call2 := mapNativeToolCall(item2, tools)
+	if call2 == nil || call2.Name != "run_officejs" {
+		t.Fatalf("missing inner name should passthrough, got %+v", call2)
+	}
+}

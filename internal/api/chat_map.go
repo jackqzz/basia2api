@@ -31,7 +31,7 @@ func toAdapterRequest(ctx context.Context, req *ChatCompletionRequest, systemPro
 			Reasoning:  m.Reasoning,
 		}
 		for _, f := range extractFiles(ctx, m.Content) {
-			msg.Files = append(msg.Files, adapter.File{Name: f.Name, Mime: f.Mime, Data: f.Data, Text: f.Text})
+			msg.Files = append(msg.Files, adapter.File{Name: f.Name, Mime: f.Mime, Data: f.Data, Text: f.Text, URL: f.URL})
 		}
 		for _, tc := range m.ToolCalls {
 			msg.ToolCalls = append(msg.ToolCalls, adapter.ToolCall{

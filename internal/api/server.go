@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"bps-2api/internal/adapter"
+	"bps-2api/internal/adapter/bps"
 	"bps-2api/internal/admin"
 	"bps-2api/internal/auth"
 	"bps-2api/internal/clientkeys"
@@ -69,6 +70,7 @@ func NewServer(cfg *config.Config) (*Server, error) {
 
 	if cfg != nil {
 		secret.Configure(cfg.EncryptKey)
+		bps.SetPublicImageBase(cfg.PublicBaseURL)
 	} else {
 		secret.ConfigureFromEnv()
 	}
@@ -262,6 +264,10 @@ func (s *Server) pickAny() (*pool.Account, error) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	// OpenAI 兼容端点
+	// 暂存图片公网端点：上游 input_image 只收 http(s) URL 并服务端代抓，
+	// 客户端 base64 图挂这里让它来抓。id 随机不可枚举 → 免鉴权。
+	mux.HandleFunc("/v1/img/", bps.ServeStashedImage)
+
 	mux.HandleFunc("/v1/models", s.requireAPIKey(s.handleModels))
 	mux.HandleFunc("/v1/models/refresh", s.handleModelsRefresh)
 	mux.HandleFunc("/v1/chat/completions", s.requireAPIKey(s.handleChat))
@@ -663,6 +669,12 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, req *ChatCom
 		reinforced := false                 // 协议强化重试至多一次（判定见 sandbox_guard.go）
 		salvaged := false                   // 交付追捞重试至多一次（与协议强化互斥，判定见 sandbox_guard.go）
 		salvageRecovered := false           // 追捞轮已把内容带回正文：剪除护栏让路（再剪会弹多余的网关说明）
+		var firstContentAt time.Time        // 首个内容帧（Text/Thinking/ToolCall）发出时刻——TTFT 观测
+		markFirstContent := func() {
+			if firstContentAt.IsZero() {
+				firstContentAt = time.Now()
+			}
+		}
 		ensureFirstFrame := func() {
 			if sentFirst {
 				return
@@ -701,6 +713,7 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, req *ChatCom
 					Choices: []ChoiceChunk{{Index: 0, Delta: Delta{Content: &s}}}}
 				if ss.Event(chunk) == nil {
 					sentContent = true
+					markFirstContent()
 				}
 			}
 			lo, hi := streamTPSRange()
@@ -769,6 +782,7 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, req *ChatCom
 			if delta.Content != nil || delta.ReasoningContent != nil || len(delta.ToolCalls) > 0 {
 				// gate 命中时文本被攒起、此帧只发空 delta：内容帧的判定以实际发出的 delta 为准
 				sentContent = true
+				markFirstContent()
 			}
 			if ss.Event(chunk) != nil {
 				return false
@@ -910,10 +924,6 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, req *ChatCom
 		if streamErr == nil {
 			s.recordClientUsage(r, usage.PromptTokens, usage.CompletionTokens)
 		}
-		log.Printf("chat stream=true account=%s model=%s prompt=%d completion=%d total=%d ctx_used=%d ctx_limit=%d latency=%s",
-			acc.Name, req.Model, usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens,
-			ctxUsed(lastCtx), ctxLimit(lastCtx), time.Since(start).Round(time.Millisecond))
-
 		if streamErr != nil {
 			// 流中已发出数据，追加错误内容帧后结束
 			msg := streamErr.Error()
@@ -938,8 +948,10 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, req *ChatCom
 			ensureFirstFrame()
 			final, action := s.guardIdentityAnswer(gateQuestion, gateText.String())
 			logIdentityGuard(action, gateQuestion)
-			ss.Event(ChatCompletionChunk{ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
-				Choices: []ChoiceChunk{{Index: 0, Delta: Delta{Content: &final}}}})
+			if ss.Event(ChatCompletionChunk{ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
+				Choices: []ChoiceChunk{{Index: 0, Delta: Delta{Content: &final}}}}) == nil {
+				markFirstContent()
+			}
 		}
 
 		// 冲刷延迟正文：到此处仍无工具调用送达，过沙箱护栏（零 tool_call 才剪）。
@@ -948,9 +960,20 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, req *ChatCom
 		// S1 收尾：流式路径正文已逐帧发出，模型文本无法回改；只补受限说明帧。
 		// 客户端看到说明后，下一轮回灌/追问时模型已知"该工具在客户端不存在"。
 		if note := blockedToolNote(blockedCalls); note != "" {
-			ss.Event(ChatCompletionChunk{ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
-				Choices: []ChoiceChunk{{Index: 0, Delta: Delta{Content: &note}}}})
+			if ss.Event(ChatCompletionChunk{ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
+				Choices: []ChoiceChunk{{Index: 0, Delta: Delta{Content: &note}}}}) == nil {
+				markFirstContent()
+			}
 		}
+
+		// 日志放在内容全部发出之后：latency 含打字机时长，ttft=首个内容帧时刻。
+		ttft := ""
+		if !firstContentAt.IsZero() {
+			ttft = " ttft=" + firstContentAt.Sub(start).Round(time.Millisecond).String()
+		}
+		log.Printf("chat stream=true account=%s model=%s prompt=%d completion=%d total=%d ctx_used=%d ctx_limit=%d latency=%s%s",
+			acc.Name, req.Model, usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens,
+			ctxUsed(lastCtx), ctxLimit(lastCtx), time.Since(start).Round(time.Millisecond), ttft)
 
 		ensureFirstFrame()
 		fr := "stop"

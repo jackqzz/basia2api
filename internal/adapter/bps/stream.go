@@ -2,7 +2,6 @@ package bps
 
 import (
 	"bufio"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,9 +10,6 @@ import (
 
 	"bps-2api/internal/adapter"
 )
-
-// base64Std 是 data URL 编码用的标准 base64。
-var base64Std = base64.StdEncoding
 
 // ============================================================
 // Responses SSE → adapter.Event。
@@ -204,13 +200,18 @@ func mapNativeToolCall(item outputItem, tools []adapter.ToolDef) *adapter.Stream
 	if isTransportName(name) {
 		env := transportEnvelope(name, rawArgs)
 		if env == nil {
-			log.Printf("bps: drop run_officejs: malformed envelope")
-			return nil
+			// code 不是客户端工具 envelope：模型想跑真正的 OfficeJS（Excel.run 之类）。
+			// 原样透传——Excel bridge 客户端能执行；普通客户端会回 "unknown tool"
+			// 让模型续走。丢弃会造空回复→换号重试→单号池 503（线上实锤）。
+			log.Printf("bps: passthrough native %q (real OfficeJS, not client-tool envelope)", name)
+			return &adapter.StreamedToolCall{Tool: "function", ToolCallID: item.CallID,
+				Name: name, RawArgs: rawArgs, Kind: "function"}
 		}
 		inner, _ := env["name"].(string)
 		if inner == "" {
-			log.Printf("bps: drop run_officejs: envelope missing inner name")
-			return nil
+			log.Printf("bps: passthrough native %q (envelope missing inner name)", name)
+			return &adapter.StreamedToolCall{Tool: "function", ToolCallID: item.CallID,
+				Name: name, RawArgs: rawArgs, Kind: "function"}
 		}
 		name = inner
 		switch a := env["arguments"].(type) {

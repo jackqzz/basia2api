@@ -46,6 +46,8 @@ type File struct {
 	Mime string
 	Data []byte
 	Text string
+	// URL 是 http(s) 图片地址（原样透传，上游服务端代抓）。
+	URL string
 }
 
 // ToolDef is an OpenAI function tool.

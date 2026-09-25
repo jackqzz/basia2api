@@ -33,6 +33,10 @@ type Config struct {
 	ProxyURL       string
 	AdminStaticDir string
 	DebugDir       string
+	// PublicBaseURL 是网关的公网可达基址（如 https://gw.example.com）。
+	// 设置后客户端 base64 图会暂存到 /v1/img/{id} 让上游抓取（data: URL
+	// 上游一律 422）；未设置则图片降级为占位文本。
+	PublicBaseURL string
 }
 
 func Default() *Config {
@@ -97,6 +101,9 @@ func Default() *Config {
 		c.AdminStaticDir = v
 	} else {
 		c.AdminStaticDir = "web/dist"
+	}
+	if v := os.Getenv("WEB2API_PUBLIC_URL"); v != "" {
+		c.PublicBaseURL = v
 	}
 	if v := os.Getenv("WEB2API_DEBUG_DIR"); v != "" {
 		c.DebugDir = v

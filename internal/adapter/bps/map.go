@@ -154,11 +154,26 @@ func userMessageItem(m adapter.ChatMessage) map[string]any {
 		parts = append(parts, map[string]any{"type": "input_text", "text": t})
 	}
 	for _, f := range m.Files {
-		if strings.HasPrefix(strings.ToLower(f.Mime), "image/") && len(f.Data) > 0 {
-			parts = append(parts, map[string]any{
-				"type":      "input_image",
-				"image_url": fmt.Sprintf("data:%s;base64,%s", f.Mime, encodeBase64(f.Data)),
-			})
+		isImage := strings.HasPrefix(strings.ToLower(f.Mime), "image/") || f.URL != ""
+		if isImage {
+			// 上游 input_image 只认 http(s) URL 并由服务端代抓；data: base64 一律 422。
+			// f.URL 的来源：客户端给的公网 URL 原样透传；本地图由 prepareImages
+			// 先走 ChatGPT 文件通道上传换 oaiusercontent SAS 地址（无需公网网关）。
+			// 都没成 → 公网基址暂存（若配置）→ 占位文本兜底，整轮请求不被图拖死。
+			url := strings.TrimSpace(f.URL)
+			if url == "" && len(f.Data) > 0 {
+				url = stashImage(f.Data, firstNonEmpty(f.Mime, "image/png"))
+			}
+			if url != "" {
+				parts = append(parts, map[string]any{"type": "input_image", "image_url": url})
+				continue
+			}
+			name := strings.TrimSpace(f.Name)
+			if name == "" {
+				name = "image"
+			}
+			parts = append(parts, map[string]any{"type": "input_text", "text": fmt.Sprintf(
+				"[image %s (%s, %d bytes): upstream does not accept image input; content omitted]", name, f.Mime, len(f.Data))})
 			continue
 		}
 		marker := fileTextBlock(f)
@@ -241,11 +256,6 @@ func functionCallItem(tc adapter.ToolCall) map[string]any {
 		"type": "function_call", "call_id": id,
 		"name": tc.Name, "arguments": args,
 	})
-}
-
-// encodeBase64 标准 base64（data URL 用）。
-func encodeBase64(data []byte) string {
-	return base64Std.EncodeToString(data)
 }
 
 // isSystemRole 判断 system/developer 角色。
