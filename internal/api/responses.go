@@ -62,15 +62,15 @@ type responsesTool struct {
 // Tools 承载 type=additional_tools 条目里的命名空间工具组（Codex 新版把
 // 工具声明放在 input 里而不是顶层 tools 字段）。
 type responsesInputItem struct {
-	Role       string                 `json:"role"`
-	Type       string                 `json:"type"` // message | function_call | function_call_output | custom_tool_call | custom_tool_call_output | additional_tools | reasoning
-	Content    any                    `json:"content,omitempty"`
-	Name       string                 `json:"name,omitempty"`
-	CallID     string                 `json:"call_id,omitempty"`
-	Output     any                    `json:"output,omitempty"`
-	Arguments  any                    `json:"arguments,omitempty"`
-	Input      any                    `json:"input,omitempty"`
-	ToolCallID string                 `json:"tool_call_id,omitempty"`
+	Role       string                   `json:"role"`
+	Type       string                   `json:"type"` // message | function_call | function_call_output | custom_tool_call | custom_tool_call_output | additional_tools | reasoning
+	Content    any                      `json:"content,omitempty"`
+	Name       string                   `json:"name,omitempty"`
+	CallID     string                   `json:"call_id,omitempty"`
+	Output     any                      `json:"output,omitempty"`
+	Arguments  any                      `json:"arguments,omitempty"`
+	Input      any                      `json:"input,omitempty"`
+	ToolCallID string                   `json:"tool_call_id,omitempty"`
 	Tools      []responsesNamespaceTool `json:"tools,omitempty"`
 }
 

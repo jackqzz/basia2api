@@ -159,9 +159,9 @@ func credentialCSVToImports(text, namePrefix string) ([]adminapi.AccountImport, 
 			name = "acct-" + shortID(access)
 		}
 		in := adminapi.AccountImport{
-			Name:        name,
-			Email:       email,
-			AccessToken: access,
+			Name:         name,
+			Email:        email,
+			AccessToken:  access,
 			RefreshToken: siteadapter.BuildImportBundle(access, refresh, acct, email, proxy),
 		}
 		if proxy != "" {

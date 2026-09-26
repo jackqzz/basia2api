@@ -43,7 +43,7 @@ func TestStreamSendsBpsHeadersAndBody(t *testing.T) {
 
 	access := newTestAccessToken(t, "acct-42")
 	client := newHTTPClient(adapter.ClientConfig{
-		BaseURL:    srv.URL,
+		BaseURL: srv.URL,
 		TokenProvider: func() (string, error) {
 			return EncodeSecret(Secret{AccessToken: access, RefreshToken: "rt.1"}), nil
 		},

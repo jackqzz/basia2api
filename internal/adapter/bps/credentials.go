@@ -31,9 +31,9 @@ type Secret struct {
 
 // jwtClaims 是 ChatGPT access/id token 里用得到的字段。
 type jwtClaims struct {
-	Exp     int64  `json:"exp"`
-	Sub     string `json:"sub"`
-	Email   string `json:"email"`
+	Exp     int64          `json:"exp"`
+	Sub     string         `json:"sub"`
+	Email   string         `json:"email"`
 	Auth    *authClaims    `json:"https://api.openai.com/auth"`
 	Profile *profileClaims `json:"https://api.openai.com/profile"`
 }
