@@ -578,7 +578,8 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, req *ChatCom
 	role := "assistant"
 	first := ChatCompletionChunk{ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
 		Choices: []ChoiceChunk{{Index: 0, Delta: Delta{Role: role}}}}
-	sentFirst := false // role 首帧是否已发出；只发一次，换号重试不再重发（T1.0）
+	sentFirst := false    // role 首帧是否已发出；只发一次，换号重试不再重发（T1.0）
+	heartbeatSpace := "​" // U+200B 零宽空格：让心跳帧穿透 chat→responses 翻译器（空 delta 会被整条丢弃）
 	// 空 completion 换号重试计数：上游「假完成」（整轮零产出）时换号重来，
 	// 至多 emptyRetryMax 次，仍空则按上游错误收尾——空 200 在 NewAPI 面板是
 	// 0 t/s 假成功（实测 24h 约 900 例），客户拿到空消息也无法重试。
@@ -650,8 +651,15 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, req *ChatCom
 				case <-r.Context().Done():
 					return
 				case <-t.C:
+					// 心跳帧必须能在翻译链路中存活：空 delta 会被中间层
+					// chat→responses 转换器整条丢弃（CPA openai→codex 与
+					// NewAPI ConvertStreamResponseChunk 都要求 content/
+					// reasoning_content 非空），codex 客户端空闲看门狗照旧
+					// 断流（线上 ~140s 齐断）。改发 reasoning_content=零宽空格：
+					// 非空 → 各层转换成 reasoning_summary_text.delta 真实事件，
+					// 客户端看门狗喂饱；零宽空格在思考区不可见，不污染正文。
 					hb := ChatCompletionChunk{ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
-						Choices: []ChoiceChunk{{Index: 0, Delta: Delta{}}}}
+						Choices: []ChoiceChunk{{Index: 0, Delta: Delta{ReasoningContent: &heartbeatSpace}}}}
 					if ss.Event(hb) != nil {
 						return
 					}
@@ -661,15 +669,17 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, req *ChatCom
 		var toolSeq = map[string]int{}
 		var outTokens int
 		var lastCtx *adapter.ContextWindowStatus
-		var gateText strings.Builder        // gate 命中时攒全文，结束时清洗后一次性发出
-		toolCalled := false                 // 是否已发出工具调用（决定 finish_reason）
-		clientTools := clientToolIndex(req) // 客户端声明的工具集（内置工具映射目标）
-		var blockedCalls []string           // S1：上游调了但客户端没有的工具（吞帧，只记摘要）
-		var pendingText strings.Builder     // 非 gate 路径正文缓冲（沙箱护栏要看全本轮工具调用再发）
-		reinforced := false                 // 协议强化重试至多一次（判定见 sandbox_guard.go）
-		salvaged := false                   // 交付追捞重试至多一次（与协议强化互斥，判定见 sandbox_guard.go）
-		salvageRecovered := false           // 追捞轮已把内容带回正文：剪除护栏让路（再剪会弹多余的网关说明）
-		var firstContentAt time.Time        // 首个内容帧（Text/Thinking/ToolCall）发出时刻——TTFT 观测
+		var gateText strings.Builder                   // gate 命中时攒全文，结束时清洗后一次性发出
+		toolCalled := false                            // 是否已发出工具调用（决定 finish_reason）
+		clientTools := clientToolIndex(req)            // 客户端声明的工具集（内置工具映射目标）
+		var blockedCalls []string                      // S1：上游调了但客户端没有的工具（吞帧，只记摘要）
+		var malformedTransports []adapter.ToolCallInfo // 畸形 run_officejs 传输调用（回灌重试用）
+		transportRetried := false                      // 畸形传输已回灌纠正过一轮
+		var pendingText strings.Builder                // 非 gate 路径正文缓冲（沙箱护栏要看全本轮工具调用再发）
+		reinforced := false                            // 协议强化重试至多一次（判定见 sandbox_guard.go）
+		salvaged := false                              // 交付追捞重试至多一次（与协议强化互斥，判定见 sandbox_guard.go）
+		salvageRecovered := false                      // 追捞轮已把内容带回正文：剪除护栏让路（再剪会弹多余的网关说明）
+		var firstContentAt time.Time                   // 首个内容帧（Text/Thinking/ToolCall）发出时刻——TTFT 观测
 		markFirstContent := func() {
 			if firstContentAt.IsZero() {
 				firstContentAt = time.Now()
@@ -758,24 +768,45 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, req *ChatCom
 			}
 			if ev.ToolCall != nil {
 				idx := toolIndex(toolSeq, ev.ToolCall.ToolCallID)
-				name, args, blocked, ok := gateUpstreamToolCall(&adapter.ToolCallInfo{
-					Kind:       ev.ToolCall.Kind,
-					ToolName:   ev.ToolCall.Name,
-					ToolCallID: ev.ToolCall.ToolCallID,
-					ArgsJSON:   ev.ToolCall.RawArgs,
-				}, clientTools)
-				if ok {
-					flushPendingText(false) // 工具调用走正道：缓冲的正文原样先出，不过护栏
-					delta.ToolCalls = []ToolCallDelta{{
-						Index: idx, ID: ev.ToolCall.ToolCallID, Type: "function",
-						Function: ToolCallFunction{Name: name, Arguments: args},
-					}}
-					addOut(name + args)
-					toolCalled = true
-				} else if blocked != "" {
-					// S1：客户端没有该工具——吞帧并记录，收尾时以受限块补进上下文。
-					blockedCalls = append(blockedCalls, blocked)
-					log.Printf("chat upstream tool blocked (client lacks tool): %s account=%s", blocked, acc.Name)
+				if ev.ToolCall.Kind == "transport_malformed" {
+					// 畸形 run_officejs 传输调用：客户端声明了同名工具
+					// （Excel bridge）→ 原样透传执行；否则收集起来，轮末
+					// 回灌 function_call_output 纠正指引重跑一轮（见下方）。
+					if _, has := clientTools.names["run_officejs"]; has {
+						flushPendingText(false)
+						delta.ToolCalls = []ToolCallDelta{{
+							Index: idx, ID: ev.ToolCall.ToolCallID, Type: "function",
+							Function: ToolCallFunction{Name: ev.ToolCall.Name, Arguments: ev.ToolCall.RawArgs},
+						}}
+						addOut(ev.ToolCall.Name + ev.ToolCall.RawArgs)
+						toolCalled = true
+					} else {
+						malformedTransports = append(malformedTransports, adapter.ToolCallInfo{
+							Kind: ev.ToolCall.Kind, ToolName: ev.ToolCall.Name,
+							ToolCallID: ev.ToolCall.ToolCallID, ArgsJSON: ev.ToolCall.RawArgs,
+						})
+						log.Printf("chat malformed transport call held for feedback retry: %s account=%s ctools=%d", ev.ToolCall.Name, acc.Name, len(clientTools.names))
+					}
+				} else {
+					name, args, blocked, ok := gateUpstreamToolCall(&adapter.ToolCallInfo{
+						Kind:       ev.ToolCall.Kind,
+						ToolName:   ev.ToolCall.Name,
+						ToolCallID: ev.ToolCall.ToolCallID,
+						ArgsJSON:   ev.ToolCall.RawArgs,
+					}, clientTools)
+					if ok {
+						flushPendingText(false) // 工具调用走正道：缓冲的正文原样先出，不过护栏
+						delta.ToolCalls = []ToolCallDelta{{
+							Index: idx, ID: ev.ToolCall.ToolCallID, Type: "function",
+							Function: ToolCallFunction{Name: name, Arguments: args},
+						}}
+						addOut(name + args)
+						toolCalled = true
+					} else if blocked != "" {
+						// S1：客户端没有该工具——吞帧并记录，收尾时以受限块补进上下文。
+						blockedCalls = append(blockedCalls, blocked)
+						log.Printf("chat upstream tool blocked (client lacks tool): %s account=%s ctools=%d", blocked, acc.Name, len(clientTools.names))
+					}
 				}
 			}
 			chunk.Choices = []ChoiceChunk{{Index: 0, Delta: delta}}
@@ -798,6 +829,7 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, req *ChatCom
 			gateText.Reset()
 			toolCalled = false
 			blockedCalls = nil
+			malformedTransports = nil
 			pendingText.Reset()
 			sentContent = false
 			return acc.Client.Stream(r.Context(), agentReq, onEvent)
@@ -842,6 +874,41 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, req *ChatCom
 					}
 				}
 			}
+		}
+
+		// 畸形传输回灌：模型把 run_officejs code 里的 envelope JSON 写坏了
+		// （大 heredoc 参数常见），客户端又没声明 run_officejs——透传是死路。
+		// 把模型的坏调用原样回放 + function_call_output 纠正指引，同账号重跑
+		// 一轮让模型重新生成合法 envelope（至多一次；重试轮里再畸形就放弃，
+		// 走下方 blockedCalls 受限说明收尾）。
+		if streamErr == nil && len(malformedTransports) > 0 && !transportRetried {
+			items := make([]any, 0, len(malformedTransports)*2)
+			catalog := clientTools.catalogNames()
+			for _, tc := range malformedTransports {
+				items = append(items, bps.TransportRetryItems(tc.ToolCallID, tc.ToolName, tc.ArgsJSON, catalog)...)
+			}
+			if len(items) > 0 {
+				if b, mErr := json.Marshal(items); mErr == nil {
+					log.Printf("chat transport-feedback retry (%d malformed call(s)) account=%s", len(malformedTransports), acc.Name)
+					transportRetried = true
+					if agentReq.Extra == nil {
+						agentReq.Extra = map[string]any{}
+					}
+					agentReq.Extra["bps_transport_items"] = string(b)
+					streamErr = runRound()
+				}
+			}
+		}
+		// 回灌轮仍畸形 → 不再重试，把残留调用并入受限说明（客户端最终能看到事实）。
+		for _, tc := range malformedTransports {
+			summary := strings.TrimSpace(tc.ToolName)
+			if a := strings.TrimSpace(tc.ArgsJSON); a != "" && a != "{}" {
+				if len(a) > 300 {
+					a = a[:300] + "…"
+				}
+				summary += "(" + a + ")"
+			}
+			blockedCalls = append(blockedCalls, summary)
 		}
 
 		if streamErr == nil && outTokens == 0 && len(blockedCalls) == 0 {
@@ -1031,7 +1098,9 @@ func (s *Server) nonStreamChat(w http.ResponseWriter, r *http.Request, req *Chat
 		var thinking strings.Builder
 		var toolCalls []ToolCall
 		var lastCtx *adapter.ContextWindowStatus
-		var blockedCalls []string // S1：上游调了但客户端没有的工具（吞帧，只记摘要）
+		var blockedCalls []string                      // S1：上游调了但客户端没有的工具（吞帧，只记摘要）
+		var malformedTransports []adapter.ToolCallInfo // 畸形 run_officejs 传输调用（回灌重试用）
+		transportRetried := false                      // 畸形传输已回灌纠正过一轮
 		sentAny := false
 		clientTools := clientToolIndex(req)
 		reinforced := false       // 协议强化重试至多一次（判定见 sandbox_guard.go）
@@ -1048,6 +1117,23 @@ func (s *Server) nonStreamChat(w http.ResponseWriter, r *http.Request, req *Chat
 			}
 			text.WriteString(ev.Text)
 			if ev.ToolCall != nil {
+				if ev.ToolCall.Kind == "transport_malformed" {
+					// 畸形传输调用：声明了 run_officejs 的客户端透传执行；
+					// 否则收集起来轮末回灌纠正（见下方 transport-feedback）。
+					if _, has := clientTools.names["run_officejs"]; has {
+						toolCalls = append(toolCalls, ToolCall{
+							ID: ev.ToolCall.ToolCallID, Type: "function",
+							Function: ToolCallFunction{Name: ev.ToolCall.Name, Arguments: ev.ToolCall.RawArgs},
+						})
+					} else {
+						malformedTransports = append(malformedTransports, adapter.ToolCallInfo{
+							Kind: ev.ToolCall.Kind, ToolName: ev.ToolCall.Name,
+							ToolCallID: ev.ToolCall.ToolCallID, ArgsJSON: ev.ToolCall.RawArgs,
+						})
+						log.Printf("chat malformed transport call held for feedback retry: %s account=%s ctools=%d", ev.ToolCall.Name, acc.Name, len(clientTools.names))
+					}
+					return true
+				}
 				name, args, blocked, ok := gateUpstreamToolCall(&adapter.ToolCallInfo{
 					Kind:       ev.ToolCall.Kind,
 					ToolName:   ev.ToolCall.Name,
@@ -1061,7 +1147,7 @@ func (s *Server) nonStreamChat(w http.ResponseWriter, r *http.Request, req *Chat
 					})
 				} else if blocked != "" {
 					blockedCalls = append(blockedCalls, blocked)
-					log.Printf("chat upstream tool blocked (client lacks tool): %s account=%s", blocked, acc.Name)
+					log.Printf("chat upstream tool blocked (client lacks tool): %s account=%s ctools=%d", blocked, acc.Name, len(clientTools.names))
 				}
 			}
 			return true
@@ -1074,6 +1160,7 @@ func (s *Server) nonStreamChat(w http.ResponseWriter, r *http.Request, req *Chat
 			toolCalls = nil
 			lastCtx = nil
 			blockedCalls = nil
+			malformedTransports = nil
 			sentAny = false
 			return acc.Client.Stream(r.Context(), agentReq, onEvent)
 		}
@@ -1114,6 +1201,38 @@ func (s *Server) nonStreamChat(w http.ResponseWriter, r *http.Request, req *Chat
 					}
 				}
 			}
+		}
+
+		// 畸形 run_officejs 传输回灌：模型把 code 写坏（大 heredoc 常见）且客户端
+		// 没声明 run_officejs——透传是死路。原样回放坏调用 + function_call_output
+		// 纠正指引，同账号重跑一轮（至多一次；再畸形则并入受限说明收尾）。
+		if streamErr == nil && len(malformedTransports) > 0 && !transportRetried {
+			items := make([]any, 0, len(malformedTransports)*2)
+			catalog := clientTools.catalogNames()
+			for _, tc := range malformedTransports {
+				items = append(items, bps.TransportRetryItems(tc.ToolCallID, tc.ToolName, tc.ArgsJSON, catalog)...)
+			}
+			if len(items) > 0 {
+				if b, mErr := json.Marshal(items); mErr == nil {
+					log.Printf("chat transport-feedback retry (%d malformed call(s)) account=%s", len(malformedTransports), acc.Name)
+					transportRetried = true
+					if agentReq.Extra == nil {
+						agentReq.Extra = map[string]any{}
+					}
+					agentReq.Extra["bps_transport_items"] = string(b)
+					streamErr = runRound()
+				}
+			}
+		}
+		for _, tc := range malformedTransports {
+			summary := strings.TrimSpace(tc.ToolName)
+			if a := strings.TrimSpace(tc.ArgsJSON); a != "" && a != "{}" {
+				if len(a) > 300 {
+					a = a[:300] + "…"
+				}
+				summary += "(" + a + ")"
+			}
+			blockedCalls = append(blockedCalls, summary)
 		}
 
 		if streamErr == nil && text.Len() == 0 && thinking.Len() == 0 && len(toolCalls) == 0 && len(blockedCalls) == 0 {

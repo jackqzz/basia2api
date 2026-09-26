@@ -1,6 +1,7 @@
 package bps
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -103,6 +104,14 @@ func buildInput(nr *adapter.NativeRequest) []any {
 			// 已合并到最前
 		default:
 			items = append(items, messageInputItems(m)...)
+		}
+	}
+	// 畸形传输回灌：模型写了坏 envelope，重放其 function_call + 纠正回执，
+	// 让它重出一轮合法调用（见 toolrelay.go TransportRetryItems）。
+	if s := extraString(nr, "bps_transport_items"); s != "" {
+		var extra []any
+		if json.Unmarshal([]byte(s), &extra) == nil {
+			items = append(items, extra...)
 		}
 	}
 	if len(items) == 0 {

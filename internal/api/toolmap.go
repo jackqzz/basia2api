@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -104,6 +105,19 @@ func indexFromNames(names map[string]bool) *clientToolSet {
 
 func (idx *clientToolSet) empty() bool {
 	return idx == nil || len(idx.names) == 0
+}
+
+// catalogNames 返回客户端声明的工具原样名（排序，供回灌指引列出可抄名字）。
+func (idx *clientToolSet) catalogNames() []string {
+	if idx.empty() {
+		return nil
+	}
+	out := make([]string, 0, len(idx.names))
+	for _, orig := range idx.names {
+		out = append(out, orig)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (idx *clientToolSet) pick(candidates ...string) (string, bool) {

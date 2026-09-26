@@ -30,13 +30,48 @@ const externalClientInstructions = "This request is relayed by an external OpenA
 	"answer as assistant text."
 
 // transportRetryGuidance 在 run_officejs envelope 畸形被回灌时替换输出。
-const transportRetryGuidance = "The previous run_officejs relay was rejected " +
-	"because its transport envelope was malformed. Retry once with exactly one " +
-	"outer run_officejs call. Its code field is JSON text, not JavaScript or " +
-	"OfficeJS, and must contain one catalog-tool object; do not put another " +
-	"run_officejs wrapper inside it. Serialize the inner JSON before placing it " +
-	"in code, including any backslashes or quotes in shell commands, and do not " +
-	"repeat the identical payload."
+// catalog 是客户端声明的工具真名列表，随指引一起喂给模型，让它第二轮
+// 照抄合法 envelope 而不是再自由发挥。
+func transportRetryGuidance(catalog []string) string {
+	g := "The previous run_officejs relay was rejected " +
+		"because its transport envelope was malformed. Retry once with exactly one " +
+		"outer run_officejs call. Its code field is JSON text, not JavaScript or " +
+		"OfficeJS, and must contain one catalog-tool object; do not put another " +
+		"run_officejs wrapper inside it. Serialize the inner JSON before placing it " +
+		"in code, including any backslashes or quotes in shell commands, and do not " +
+		"repeat the identical payload."
+	if len(catalog) > 0 {
+		g += " The inner name must be one of: " + strings.Join(catalog, ", ") +
+			". Minimal valid shape: {\"name\":\"TOOL\",\"arguments\":{...}} as the code string."
+	}
+	return g
+}
+
+// TransportRetryItems 给畸形传输调用构造回灌 input 项：原样重放模型的那次
+// function_call（含坏 args，模型视角里它就是这么调的）+ function_call_output
+// 回执纠正指引，让模型重出一轮合法 envelope。返回 nil 表示 callID 为空不可回放。
+func TransportRetryItems(callID, name, rawArgs string, catalog []string) []any {
+	callID = strings.TrimSpace(callID)
+	if callID == "" {
+		return nil
+	}
+	if strings.TrimSpace(name) == "" {
+		name = transportToolName
+	}
+	if strings.TrimSpace(rawArgs) == "" {
+		rawArgs = "{}"
+	}
+	return []any{
+		map[string]any{
+			"type": "function_call", "id": functionItemID(callID), "call_id": callID,
+			"name": name, "arguments": rawArgs, "status": "completed",
+		},
+		map[string]any{
+			"type": "function_call_output", "id": "fc_" + newID(),
+			"call_id": callID, "output": transportRetryGuidance(catalog),
+		},
+	}
+}
 
 func isTransportName(name string) bool {
 	return name == transportToolName || name == "functions."+transportToolName
@@ -280,11 +315,32 @@ func transportEnvelope(nativeName, rawArguments string) map[string]any {
 	if !isTransportName(nativeName) {
 		return nil
 	}
+	var env map[string]any
 	var args map[string]any
-	if json.Unmarshal([]byte(rawArguments), &args) != nil {
-		return nil
+	if json.Unmarshal([]byte(rawArguments), &args) == nil {
+		env = decodeTransportCode(args["code"])
+		if env == nil {
+			// 兼容：模型把 envelope 当顶层 args 直写（少套一层 code）。
+			if _, ok := args["name"].(string); ok {
+				env = args
+			} else if s, ok := args["code"].(string); ok {
+				env = salvageJSToolCall(s)
+			}
+		}
+	} else if idx := codeFieldIndex(rawArguments); idx >= 0 {
+		// 外层转义崩坏的打捞：模型常把内层 envelope JSON 未转义嵌进 code
+		// 字符串（"code":"{"name":...），整体不是合法 JSON，但内层裸露可取——
+		// 从 code 字段起的子串里扫第一个完整 JSON 对象，通常就是那枚 envelope。
+		env = decodeTransportCode(rawArguments[idx:])
+		if env == nil {
+			env = salvageJSToolCall(rawArguments[idx:])
+		}
 	}
-	env := decodeTransportCode(args["code"])
+	return unwrapTransportEnvelope(env)
+}
+
+// unwrapTransportEnvelope 剥至多两层嵌套 transport；内层名仍是 transport 名则视为畸形。
+func unwrapTransportEnvelope(env map[string]any) map[string]any {
 	for i := 0; i < 2 && env != nil; i++ {
 		innerName, _ := env["name"].(string)
 		if !isTransportName(innerName) {
@@ -312,6 +368,113 @@ func transportEnvelope(nativeName, rawArguments string) map[string]any {
 	}
 	return env
 }
+
+// codeFieldIndex 定位 args 里 "code" 字段的冒号位置（容忍空格）；找不到返回 -1。
+func codeFieldIndex(s string) int {
+	idx := strings.Index(s, `"code"`)
+	if idx < 0 {
+		return -1
+	}
+	rest := strings.TrimLeft(s[idx+6:], " \t\r\n")
+	if !strings.HasPrefix(rest, ":") {
+		return -1
+	}
+	return len(s) - len(rest)
+}
+
+// salvageJSToolCall 从 JS 文本里抠出 tools.<name>({args}) 调用——模型把
+// run_officejs 当 JS 执行器时的常见写法（await tools.exec_command({cmd:"..."})）。
+// 抠出的 args 按 envelope {"name":..., "arguments":...} 形状返回，走正常 gate。
+func salvageJSToolCall(code string) map[string]any {
+	idx := strings.Index(code, "tools.")
+	if idx < 0 {
+		return nil
+	}
+	rest := code[idx+len("tools."):]
+	end := 0
+	for end < len(rest) && isJSIdentByte(rest[end]) {
+		end++
+	}
+	name := strings.Trim(rest[:end], ".")
+	if name == "" {
+		return nil
+	}
+	paren := strings.IndexByte(rest[end:], '(')
+	if paren < 0 {
+		return nil
+	}
+	args := rest[end+paren+1:]
+	brace := strings.IndexByte(args, '{')
+	if brace < 0 {
+		return nil
+	}
+	obj := args[brace:]
+	for _, cand := range []string{obj, quoteJSObjectKeys(obj)} {
+		var m map[string]any
+		if json.NewDecoder(strings.NewReader(cand)).Decode(&m) == nil {
+			return map[string]any{"name": name, "arguments": m}
+		}
+	}
+	return nil
+}
+
+func isJSIdentByte(c byte) bool {
+	return c == '_' || c == '$' || c == '.' ||
+		'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9'
+}
+
+// quoteJSObjectKeys 给 JS 对象字面量的裸 key 加引号（字符串内容不动），
+// 把 {cmd:"x"} 修成可解析的 JSON。
+func quoteJSObjectKeys(s string) string {
+	var b strings.Builder
+	b.Grow(len(s) + 16)
+	inString := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inString {
+			b.WriteByte(c)
+			if c == '\\' && i+1 < len(s) {
+				b.WriteByte(s[i+1])
+				i++
+			} else if c == '"' {
+				inString = false
+			}
+			continue
+		}
+		if c == '"' {
+			inString = true
+			b.WriteByte(c)
+			continue
+		}
+		if c != '{' && c != ',' {
+			b.WriteByte(c)
+			continue
+		}
+		b.WriteByte(c)
+		j := i + 1
+		for j < len(s) && isSpaceByte(s[j]) {
+			j++
+		}
+		k := j
+		for k < len(s) && isJSIdentByte(s[k]) && s[k] != '.' {
+			k++
+		}
+		m := k
+		for m < len(s) && isSpaceByte(s[m]) {
+			m++
+		}
+		if k > j && m < len(s) && s[m] == ':' {
+			b.WriteString(s[i+1 : j])
+			b.WriteByte('"')
+			b.WriteString(s[j:k])
+			b.WriteByte('"')
+			i = k - 1
+		}
+	}
+	return b.String()
+}
+
+func isSpaceByte(c byte) bool { return c == ' ' || c == '\t' || c == '\r' || c == '\n' }
 
 // ---------- schema 校验（防止模型错投工具参数） ----------
 

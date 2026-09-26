@@ -200,18 +200,21 @@ func mapNativeToolCall(item outputItem, tools []adapter.ToolDef) *adapter.Stream
 	if isTransportName(name) {
 		env := transportEnvelope(name, rawArgs)
 		if env == nil {
-			// code 不是客户端工具 envelope：模型想跑真正的 OfficeJS（Excel.run 之类）。
-			// 原样透传——Excel bridge 客户端能执行；普通客户端会回 "unknown tool"
-			// 让模型续走。丢弃会造空回复→换号重试→单号池 503（线上实锤）。
-			log.Printf("bps: passthrough native %q (real OfficeJS, not client-tool envelope)", name)
+			// code 解不出客户端工具 envelope：要么是真 OfficeJS（Excel.run 之类），
+			// 要么是模型写坏了的传输调用（大 heredoc 参数下常写崩 code 里的 JSON，
+			// 如圆括号当花括号——线上实锤）。统一切记为 transport_malformed：
+			// 客户端声明了 run_officejs 的（Excel bridge）由 api 层原样透传执行；
+			// 没声明的由 api 层回灌 function_call_output 纠正指引重跑一轮，
+			// 让模型重新生成合法 envelope，比直接下发死路调用强。
+			log.Printf("bps: malformed transport %q (code is not a client-tool envelope)", name)
 			return &adapter.StreamedToolCall{Tool: "function", ToolCallID: item.CallID,
-				Name: name, RawArgs: rawArgs, Kind: "function"}
+				Name: name, RawArgs: rawArgs, Kind: "transport_malformed"}
 		}
 		inner, _ := env["name"].(string)
 		if inner == "" {
-			log.Printf("bps: passthrough native %q (envelope missing inner name)", name)
+			log.Printf("bps: malformed transport %q (envelope missing inner name)", name)
 			return &adapter.StreamedToolCall{Tool: "function", ToolCallID: item.CallID,
-				Name: name, RawArgs: rawArgs, Kind: "function"}
+				Name: name, RawArgs: rawArgs, Kind: "transport_malformed"}
 		}
 		name = inner
 		switch a := env["arguments"].(type) {

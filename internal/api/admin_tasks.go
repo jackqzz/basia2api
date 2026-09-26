@@ -183,7 +183,6 @@ func accountActionTitle(action string, n int) string {
 	}
 }
 
-
 func (s *Server) runAccountBatch(ctx *tasks.Context, action string, names []string, proxyID *string) (any, error) {
 	type item struct {
 		Name  string `json:"name"`

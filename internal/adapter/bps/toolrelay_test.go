@@ -205,21 +205,109 @@ func TestConsumeSSERelayedCall(t *testing.T) {
 
 func TestMapNativeToolCallPassthroughRealOfficeJS(t *testing.T) {
 	tools := []adapter.ToolDef{shellTool}
-	// code 是真实 OfficeJS（非 JSON envelope）→ 原样透传，不丢弃
+	// code 是真实 OfficeJS（非 JSON envelope）→ 标记 transport_malformed，
+	// 由 api 层决定：客户端声明了 run_officejs 则透传执行，否则回灌重试。
 	item := outputItem{Type: "function_call", Name: "run_officejs", CallID: "call_1",
 		Arguments: `{"summary":"read A1","code":"await Excel.run(async (ctx)=>{...})"}`}
 	call := mapNativeToolCall(item, tools)
 	if call == nil || call.Name != "run_officejs" || call.ToolCallID != "call_1" {
-		t.Fatalf("real OfficeJS should passthrough, got %+v", call)
+		t.Fatalf("undecodable transport should return marker, got %+v", call)
+	}
+	if call.Kind != "transport_malformed" {
+		t.Fatalf("expected transport_malformed kind, got %q", call.Kind)
 	}
 	if !strings.Contains(call.RawArgs, "Excel.run") {
 		t.Fatalf("args should be preserved raw, got %s", call.RawArgs)
 	}
-	// envelope 缺 inner name → 同样透传
+	// envelope 缺 inner name → 同样标记回灌
 	item2 := outputItem{Type: "function_call", Name: "run_officejs", CallID: "call_2",
 		Arguments: `{"summary":"x","code":"{\"foo\":1}"}`}
 	call2 := mapNativeToolCall(item2, tools)
-	if call2 == nil || call2.Name != "run_officejs" {
-		t.Fatalf("missing inner name should passthrough, got %+v", call2)
+	if call2 == nil || call2.Name != "run_officejs" || call2.Kind != "transport_malformed" {
+		t.Fatalf("missing inner name should be transport_malformed, got %+v", call2)
+	}
+}
+
+func TestTransportEnvelopeSalvageUnescapedInner(t *testing.T) {
+	// 线上实锤形态：内层 envelope JSON 未转义嵌进 code 字符串，
+	// 外层整体非法 JSON，但内层裸露可取。
+	args := `{"summary":"安装隔离建模依赖","extended_summary":"x","code":"{"name":"functions__exec","arguments":{"input":"const r=await tools.exec_command({cmd:\"$py='C:/Users/a.py'\"})"}}"}`
+	env := transportEnvelope("run_officejs", args)
+	if env == nil || env["name"] != "functions__exec" {
+		t.Fatalf("salvaged env=%v", env)
+	}
+	in, _ := env["arguments"].(map[string]any)
+	if !strings.Contains(in["input"].(string), "exec_command") {
+		t.Fatalf("input lost: %v", in)
+	}
+	// 大 heredoc + 单引号混合的嵌套命令同样打捞出
+	args2 := `{"summary":"s","code":"{"name":"shell","arguments":{"command":["python","-c","import json;print({'a':1})"]}}"}`
+	env2 := transportEnvelope("run_officejs", args2)
+	if env2 == nil || env2["name"] != "shell" {
+		t.Fatalf("salvaged env2=%v", env2)
+	}
+	// 真 OfficeJS（code 里是 JS 不是 JSON）打不出 envelope → 仍判畸形
+	args3 := `{"summary":"s","code":"await Excel.run(async (ctx)=>{ctx.workbook.worksheets;})"}`
+	if env3 := transportEnvelope("run_officejs", args3); env3 != nil {
+		t.Fatalf("real OfficeJS should not salvage, got %v", env3)
+	}
+}
+
+func TestTransportEnvelopeSalvageJSCall(t *testing.T) {
+	// 模型把 run_officejs 当 JS 执行器：code 里是裸 JS 调用。
+	args := `{"summary":"s","code":"const r=await tools.exec_command({cmd:\"python a.py\"});console.log(r)"}`
+	env := transportEnvelope("run_officejs", args)
+	if env == nil || env["name"] != "exec_command" {
+		t.Fatalf("js salvaged env=%v", env)
+	}
+	m, _ := env["arguments"].(map[string]any)
+	if m["cmd"] != "python a.py" {
+		t.Fatalf("args=%v", m)
+	}
+	// 外层转义崩 + 内层是 JS 的双重坏法也能捞
+	args2 := `{"summary":"s","code":"await tools.shell({cmd:\"ls\",timeout:30})"}`
+	env2 := transportEnvelope("run_officejs", args2)
+	if env2 == nil || env2["name"] != "shell" {
+		t.Fatalf("js salvaged env2=%v", env2)
+	}
+	if m2, _ := env2["arguments"].(map[string]any); m2["timeout"] != float64(30) {
+		t.Fatalf("args2=%v", m2)
+	}
+	// code 纯文本无 tools. 调用 → 不捞
+	args3 := `{"summary":"s","code":"just some text, no call"}`
+	if env3 := transportEnvelope("run_officejs", args3); env3 != nil {
+		t.Fatalf("plain text should not salvage, got %v", env3)
+	}
+}
+
+func TestTransportEnvelopeDirectShape(t *testing.T) {
+	// 模型把 envelope 当顶层 args 直写（少套 code）——兼容放行。
+	args := `{"name":"shell","arguments":{"command":["ls","-l"]}}`
+	env := transportEnvelope("run_officejs", args)
+	if env == nil || env["name"] != "shell" {
+		t.Fatalf("env=%v", env)
+	}
+}
+
+func TestTransportRetryItems(t *testing.T) {
+	items := TransportRetryItems("call_x", "run_officejs", `{"summary":"s","code":"bad json ("}`, []string{"exec_command", "shell"})
+	if len(items) != 2 {
+		t.Fatalf("expected call+output pair, got %d items", len(items))
+	}
+	fc, _ := items[0].(map[string]any)
+	out, _ := items[1].(map[string]any)
+	if fc["type"] != "function_call" || fc["call_id"] != "call_x" || fc["name"] != "run_officejs" {
+		t.Fatalf("bad function_call item: %+v", fc)
+	}
+	if out["type"] != "function_call_output" || out["call_id"] != "call_x" {
+		t.Fatalf("bad function_call_output item: %+v", out)
+	}
+	o, _ := out["output"].(string)
+	if !strings.Contains(o, "envelope was malformed") || !strings.Contains(o, "exec_command, shell") {
+		t.Fatalf("output should carry guidance+catalog, got %q", o)
+	}
+	// callID 为空不可回放
+	if TransportRetryItems("", "run_officejs", "{}", nil) != nil {
+		t.Fatal("empty call_id should return nil")
 	}
 }
